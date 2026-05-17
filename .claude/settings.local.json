@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(date -u +%s)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:8000/healthz)",
+      "Bash(python -m json.tool)",
+      "Bash(python -c \"import mcp; print\\(mcp.__version__ if hasattr\\(mcp, '__version__'\\) else 'installed'\\)\")",
+      "Bash(python *)",
+      "Bash(docker volume *)",
+      "Bash(git fetch *)",
+      "Bash(git checkout *)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "alpaca",
+    "fmp",
+    "fred",
+    "sec-edgar"
+  ]
+}

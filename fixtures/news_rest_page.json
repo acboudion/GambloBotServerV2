@@ -1,0 +1,29 @@
+{
+  "news": [
+    {
+      "id": 24736074,
+      "headline": "Microsoft Announces Strategic Acquisition of AI Startup",
+      "summary": "Microsoft Corp. announced an acquisition deal for an emerging AI company.",
+      "author": "Sam Reporter",
+      "created_at": "2026-04-28T19:00:00Z",
+      "updated_at": "2026-04-28T19:00:05Z",
+      "content": "<p>Microsoft Corp. <a href=\"/quote/MSFT\">(MSFT)</a> announced today that it has agreed to <strong>acquire</strong> an AI startup.</p>",
+      "url": "https://example.com/msft-acquisition",
+      "symbols": ["MSFT"],
+      "source": "benzinga"
+    },
+    {
+      "id": 24736075,
+      "headline": "Tesla Halted Pending News",
+      "summary": "Trading in Tesla shares was halted pending news.",
+      "author": "Pat Reporter",
+      "created_at": "2026-04-28T19:30:00Z",
+      "updated_at": "2026-04-28T19:30:05Z",
+      "content": "<p>Tesla (TSLA) shares were <strong>halted</strong> pending material news.</p>",
+      "url": "https://example.com/tsla-halt",
+      "symbols": ["TSLA"],
+      "source": "benzinga"
+    }
+  ],
+  "next_page_token": null
+}

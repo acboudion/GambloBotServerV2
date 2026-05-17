@@ -1,0 +1,54 @@
+INFO:     Started server process [11688]
+INFO:     Waiting for application startup.
+2026-04-28 23:51:46,724 WARNING alpaca_news_mcp.config MCP_PATH appears MSYS-mangled ('C:/Program Files/Git/mcp'); recovered as '/mcp'. Set MSYS_NO_PATHCONV=1 or launch from cmd/PowerShell to avoid this.
+2026-04-28 23:51:46,724 INFO alpaca_news_mcp.server alpaca-news-mcp starting (safe config: {'alpaca_news_stream_url': 'wss://stream.data.alpaca.markets/v1beta1/news', 'alpaca_data_base_url': 'https://data.alpaca.markets', 'mcp_host': '127.0.0.1', 'mcp_port': 8000, 'mcp_path': '/mcp', 'storage_path': './.test_data/alpaca_news.sqlite', 'log_level': 'info', 'news_subscription_mode': 'wildcard', 'news_fallback_symbols': [], 'news_interest_symbols': ['AAPL', 'MSFT', 'NVDA', 'TSLA', 'SPY', 'QQQ'], 'enable_rest_backfill': True, 'backfill_lookback_minutes': 60, 'rest_backfill_overlap_seconds': 180, 'rest_include_content': True, 'rest_exclude_contentless': False, 'max_recent_articles_memory': 5000, 'max_raw_events_memory': 2000, 'event_retention_days': 14, 'raw_event_retention_days': 7, 'reconnect_min_seconds': 5, 'reconnect_max_seconds': 120, 'connection_limit_backoff_seconds': 90, 'queue_maxsize': 10000, 'slow_client_warning_queue_depth': 7500, 'enable_manual_rest_backfill': True, 'mcp_read_only': True, 'high_latency_alert_ms': 30000})
+2026-04-28 23:51:47,155 INFO httpx HTTP Request: GET https://data.alpaca.markets/v1beta1/news?start=2026-04-29T02%3A51%3A46.734332%2B00%3A00&sort=asc&limit=50&include_content=true "HTTP/1.1 200 OK"
+2026-04-28 23:51:47,175 INFO alpaca_news_mcp.rest_backfill rest_backfill complete reason=startup pages=1 articles=2
+2026-04-28 23:51:47,177 INFO alpaca_news_mcp.stream connecting to alpaca news stream
+2026-04-28 23:51:47,186 INFO mcp.server.streamable_http_manager StreamableHTTP session manager started
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+2026-04-28 23:52:02,134 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,141 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,155 INFO mcp.server.lowlevel.server Processing request of type ListToolsRequest
+2026-04-28 23:52:02,157 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,164 INFO mcp.server.lowlevel.server Processing request of type ListResourcesRequest
+2026-04-28 23:52:02,165 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,171 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,173 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,180 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,181 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,188 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,192 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,198 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,201 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,208 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,210 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,217 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,220 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,226 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,228 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,236 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,237 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,245 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,247 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,254 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,255 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,263 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,264 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,271 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,272 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,279 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,282 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:52:02,288 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:52:02,382 INFO httpx HTTP Request: GET https://data.alpaca.markets/v1beta1/news?start=2026-04-29T03%3A42%3A02.290074%2B00%3A00&sort=asc&limit=50&include_content=true "HTTP/1.1 200 OK"
+2026-04-28 23:52:02,383 INFO alpaca_news_mcp.rest_backfill rest_backfill complete reason=manual pages=1 articles=0
+2026-04-28 23:52:02,385 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:53:02,444 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:53:02,446 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:53:02,454 INFO mcp.server.lowlevel.server Processing request of type CallToolRequest
+2026-04-28 23:53:02,456 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:53:02,463 INFO mcp.server.lowlevel.server Processing request of type ReadResourceRequest
+2026-04-28 23:53:02,464 INFO mcp.server.streamable_http Terminating session: None
+2026-04-28 23:53:02,472 INFO mcp.server.lowlevel.server Processing request of type ReadResourceRequest
+2026-04-28 23:53:02,473 INFO mcp.server.streamable_http Terminating session: None

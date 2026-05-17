@@ -1,0 +1,2049 @@
+{
+  "label": "early",
+  "started": "2026-04-29T04:10:24.077678+00:00",
+  "url": "http://localhost:8000/mcp",
+  "tools": {
+    "get_news_stream_health": {
+      "ok": true,
+      "result": {
+        "service": "alpaca-news-mcp",
+        "connected": true,
+        "authenticated": true,
+        "subscription_mode": "wildcard",
+        "requested_subscription": {
+          "news": [
+            "*"
+          ]
+        },
+        "acknowledged_subscription": {
+          "news": [
+            "*"
+          ]
+        },
+        "last_message_at": null,
+        "last_article_at": null,
+        "last_error": null,
+        "connection_attempts": 1,
+        "reconnect_count": 0,
+        "connection_limit_blocked": false,
+        "entitlement_error": false,
+        "rest_backfill_enabled": true,
+        "article_count": 1,
+        "alert_count": 2,
+        "articles_dropped": 0
+      }
+    },
+    "get_news_subscription_state": {
+      "ok": true,
+      "result": {
+        "requested": {
+          "news": [
+            "*"
+          ]
+        },
+        "acknowledged": {
+          "news": [
+            "*"
+          ]
+        },
+        "mode": "wildcard",
+        "last_ack_at": "2026-04-29T04:07:26.087200+00:00",
+        "notes": null
+      }
+    },
+    "get_recent_news[1440m]": {
+      "ok": true,
+      "result": {
+        "count": 25,
+        "articles": [
+          {
+            "id": 52117530,
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+            "author": "Aniket Verma",
+            "created_at": "2026-04-29T03:26:42+00:00",
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+            "source": "benzinga",
+            "symbols": [],
+            "first_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 2443900,
+            "is_content_present": true
+          },
+          {
+            "id": 52111114,
+            "headline": "Rogers Sees Q2 Adj EPS $0.90-$1.10 vs $0.79 Est; Sees Sales $210.000M-$220.000M vs $210.900M Est",
+            "summary": "Rogers (NYSE:ROG) is looking for Q2 Adj EPS of $0.90-$1.10 vs $0.79 analyst estimate. sees sales of $210.000 million-$220.000 million vs $210.900 million analyst estimate.",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:09:16+00:00",
+            "updated_at": "2026-04-28T20:09:17+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111114/rogers-sees-q2-adj-eps-0-90-1-10-vs-0-79-est-sees-sales-210-000m-220-000m-vs-210-900m-est",
+            "source": "benzinga",
+            "symbols": [
+              "ROG"
+            ],
+            "first_seen_at": "2026-04-28T20:09:02.497315+00:00",
+            "last_seen_at": "2026-04-28T20:09:02.497315+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13504,
+            "is_content_present": true
+          },
+          {
+            "id": 52111106,
+            "headline": "InvenTrust Properties Raises FY2026 FFO Guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 Est",
+            "summary": "InvenTrust Properties (NYSE:IVT) raises FY2026 FFO guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 analyst estimate..",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:09:12+00:00",
+            "updated_at": "2026-04-28T20:09:12+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111106/inventrust-properties-raises-fy2026-ffo-guidance-from-1-91-1-95-to-1-92-1-96-vs-1-95-est",
+            "source": "benzinga",
+            "symbols": [
+              "IVT"
+            ],
+            "first_seen_at": "2026-04-28T20:08:57.940443+00:00",
+            "last_seen_at": "2026-04-28T20:08:57.940443+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -14060,
+            "is_content_present": true
+          },
+          {
+            "id": 52111078,
+            "headline": "Tom Lee&#39;s $235M Ethereum Purchase Could Signal The End Of The Crypto Winter",
+            "summary": "Bitmine Immersion Technologies (NYSE:BMNR), a firm tied to Wall Street strategist Tom Lee, has just purchased roughly $233 million worth of Ethereum ",
+            "author": "Isaac Olaosegba",
+            "created_at": "2026-04-28T20:09:01+00:00",
+            "updated_at": "2026-04-28T20:09:02+00:00",
+            "url": "https://www.benzinga.com/Opinion/26/04/52111078/tom-lees-235m-ethereum-purchase-could-signal-the-end-of-the-crypto-winter",
+            "source": "benzinga",
+            "symbols": [
+              "BMNR",
+              "ETHUSD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13312,
+            "is_content_present": true
+          },
+          {
+            "id": 52111065,
+            "headline": "OPKO Health Sees Q2 Sales $127.000M-$132.000M vs $136.329M Est",
+            "summary": "OPKO Health (NASDAQ:OPK) sees Q2 sales of $127.000 million-$132.000 million vs $136.329 million analyst estimate.",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:55+00:00",
+            "updated_at": "2026-04-28T20:08:56+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111065/opko-health-sees-q2-sales-127-000m-132-000m-vs-136-329m-est",
+            "source": "benzinga",
+            "symbols": [
+              "OPK"
+            ],
+            "first_seen_at": "2026-04-28T20:08:41.759325+00:00",
+            "last_seen_at": "2026-04-28T20:08:41.759325+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13243,
+            "is_content_present": true
+          },
+          {
+            "id": 52111057,
+            "headline": "Robinhood Markets Q1 EPS $0.38 Misses $0.46 Estimate, Sales $1.067B Miss $1.181B Estimate",
+            "summary": "Robinhood Markets (NASDAQ:HOOD) reported quarterly earnings of $0.38 per share which missed the analyst consensus estimate of $0.46 by 17.39 percent. This is a 2.7 percent increase over earnings of $0.37 per share from",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:52+00:00",
+            "updated_at": "2026-04-28T20:08:53+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52111057/robinhood-markets-q1-eps-0-38-misses-0-46-estimate-sales-1-067b-miss-1-181b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "HOOD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:38.366399+00:00",
+            "last_seen_at": "2026-04-28T20:08:38.366399+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13635,
+            "is_content_present": true
+          },
+          {
+            "id": 52111044,
+            "headline": "PPG Indus Q1 Adj. EPS $1.83 Beats $1.77 Estimate, Sales $3.930B Beat $3.850B Estimate",
+            "summary": "PPG Indus (NYSE:PPG) reported quarterly earnings of $1.83 per share which beat the analyst consensus estimate of $1.77 by 3.39 percent. This is a 6.4 percent increase over earnings of $1.72 per share from the same period",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:48+00:00",
+            "updated_at": "2026-04-28T20:08:48+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52111044/ppg-indus-q1-adj-eps-1-83-beats-1-77-estimate-sales-3-930b-beat-3-850b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "PPG"
+            ],
+            "first_seen_at": "2026-04-28T20:08:34.008777+00:00",
+            "last_seen_at": "2026-04-28T20:08:34.008777+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13993,
+            "is_content_present": true
+          },
+          {
+            "id": 52111038,
+            "headline": "Pebblebrook Hotel Sees Q2 FFO $0.58-$0.62 vs $0.60 Est",
+            "summary": "Pebblebrook Hotel (NYSE:PEB) is looking for Q2 FFO of $0.58-$0.62 vs $0.60 analyst estimate..",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:45+00:00",
+            "updated_at": "2026-04-28T20:08:46+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111038/pebblebrook-hotel-sees-q2-ffo-0-58-0-62-vs-0-60-est",
+            "source": "benzinga",
+            "symbols": [
+              "PEB"
+            ],
+            "first_seen_at": "2026-04-28T20:08:31.318671+00:00",
+            "last_seen_at": "2026-04-28T20:08:31.318671+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13682,
+            "is_content_present": true
+          },
+          {
+            "id": 52110999,
+            "headline": "Rogers Q1 Adj. EPS $0.75 Beats $0.68 Estimate, Sales $200.500M Inline",
+            "summary": "Rogers (NYSE:ROG) reported quarterly earnings of $0.75 per share which beat the analyst consensus estimate of $0.68 by 10.29 percent. This is a 177.78 percent increase over earnings of $0.27 per share from the same",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:32+00:00",
+            "updated_at": "2026-04-28T20:08:32+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110999/rogers-q1-adj-eps-0-75-beats-0-68-estimate-sales-200-500m-inline",
+            "source": "benzinga",
+            "symbols": [
+              "ROG"
+            ],
+            "first_seen_at": "2026-04-28T20:08:18.029240+00:00",
+            "last_seen_at": "2026-04-28T20:08:18.029240+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13971,
+            "is_content_present": true
+          },
+          {
+            "id": 52110706,
+            "headline": "Welltower Q1 FFO $1.47 Beats $1.44 Estimate, Sales $3.352B Beat $3.163B Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:06:18+00:00",
+            "updated_at": "2026-04-28T20:06:18+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110706/welltower-q1-ffo-1-47-beats-1-44-estimate-sales-3-352b-beat-3-163b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "WELL"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.716594+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.716594+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 117715,
+            "is_content_present": false
+          },
+          {
+            "id": 52110694,
+            "headline": "Dawson Partners Adds Asia Presence Amid Surging Private Credit Demand",
+            "summary": "",
+            "author": "Caroline Ryan",
+            "created_at": "2026-04-28T20:06:14+00:00",
+            "updated_at": "2026-04-28T20:06:14+00:00",
+            "url": "https://www.benzinga.com/markets/private-markets/26/04/52110694/dawson-partners-adds-asia-presence-amid-surging-private-credit-demand",
+            "source": "benzinga",
+            "symbols": [
+              "KKR"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.712427+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.712427+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 121711,
+            "is_content_present": false
+          },
+          {
+            "id": 52110690,
+            "headline": "Mondelez International Q1 Adj. EPS $0.67 Beats $0.61 Estimate, Sales $10.080B Beat $9.753B Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:06:10+00:00",
+            "updated_at": "2026-04-28T20:06:10+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110690/mondelez-international-q1-adj-eps-0-67-beats-0-61-estimate-sales-10-080b-beat-9-753b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "MDLZ"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.707156+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.707156+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 125705,
+            "is_content_present": false
+          },
+          {
+            "id": 52110679,
+            "headline": "F5 Q2 Adj. EPS $3.90 Beats $3.44 Estimate, Sales $811.700M Beat $779.383M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:06:06+00:00",
+            "updated_at": "2026-04-28T20:06:07+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110679/f5-q2-adj-eps-3-90-beats-3-44-estimate-sales-811-700m-beat-779-383m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "FFIV"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.700392+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.700392+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 129699,
+            "is_content_present": false
+          },
+          {
+            "id": 52110671,
+            "headline": "OPKO Health Q1 EPS $(0.07), Inline, Sales $124.200M Miss $130.514M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:06:01+00:00",
+            "updated_at": "2026-04-28T20:06:01+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110671/opko-health-q1-eps-0-07-inline-sales-124-200m-miss-130-514m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "OPK"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.695523+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.695523+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 134694,
+            "is_content_present": false
+          },
+          {
+            "id": 52110645,
+            "headline": "Landstar System Q1 EPS $1.16 Beats $1.12 Estimate, Sales $1.171B Beat $1.156B Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:05:51+00:00",
+            "updated_at": "2026-04-28T20:05:52+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110645/landstar-system-q1-eps-1-16-beats-1-12-estimate-sales-1-171b-beat-1-156b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "LSTR"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.691433+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.691433+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 144690,
+            "is_content_present": false
+          },
+          {
+            "id": 52110642,
+            "headline": "Seacoast Banking Q1 Adj. EPS $0.62 Beats $0.58 Estimate, Sales $163.856M Miss $205.494M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:05:46+00:00",
+            "updated_at": "2026-04-28T20:05:46+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110642/seacoast-banking-q1-adj-eps-0-62-beats-0-58-estimate-sales-163-856m-miss-205-494m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "SBCF"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.685854+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.685854+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 149684,
+            "is_content_present": false
+          },
+          {
+            "id": 52110629,
+            "headline": "CoStar Gr Q1 Adj. EPS $0.23 Beats $0.18 Estimate, Sales $897.000M Beat $896.773M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:05:27+00:00",
+            "updated_at": "2026-04-28T20:05:27+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110629/costar-gr-q1-adj-eps-0-23-beats-0-18-estimate-sales-897-000m-beat-896-773m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "CSGP"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.680004+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.680004+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 168679,
+            "is_content_present": false
+          },
+          {
+            "id": 52110593,
+            "headline": "Ribbon Communications Sees Q2 Sales $185.000M-$195.000M vs $192.680M Est",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:05:15+00:00",
+            "updated_at": "2026-04-28T20:05:16+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52110593/ribbon-communications-sees-q2-sales-185-000m-195-000m-vs-192-680m-est",
+            "source": "benzinga",
+            "symbols": [
+              "RBBN"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.673696+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.673696+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 180672,
+            "is_content_present": false
+          },
+          {
+            "id": 52110585,
+            "headline": "Porch Group Q1 EPS $(0.04) Beats $(0.08) Estimate, Sales $121.123M Beat $96.488M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:05:13+00:00",
+            "updated_at": "2026-04-28T20:05:13+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110585/porch-group-q1-eps-0-04-beats-0-08-estimate-sales-121-123m-beat-96-488m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "PRCH"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.665838+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.665838+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 182665,
+            "is_content_present": false
+          },
+          {
+            "id": 52110502,
+            "headline": "MagnaChip Semiconductor Sees Q2 Sales $44.500M-$48.500M vs $46.500M Est",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:04:38+00:00",
+            "updated_at": "2026-04-28T20:04:39+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52110502/magnachip-semiconductor-sees-q2-sales-44-500m-48-500m-vs-46-500m-est",
+            "source": "benzinga",
+            "symbols": [
+              "MX"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.661025+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.661025+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 217660,
+            "is_content_present": false
+          },
+          {
+            "id": 52110470,
+            "headline": "Ribbon Comms Q1 Adj. EPS $(0.05) Beats $(0.06) Estimate, Sales $162.606M Miss $163.432M Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:04:18+00:00",
+            "updated_at": "2026-04-28T20:04:19+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110470/ribbon-comms-q1-adj-eps-0-05-beats-0-06-estimate-sales-162-606m-miss-163-432m-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "RBBN"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.656970+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.656970+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 237655,
+            "is_content_present": false
+          },
+          {
+            "id": 52110448,
+            "headline": "Omnicom Group Q1 Adj. EPS $1.90 Beats $1.85 Estimate, Sales $6.243B Beat $5.712B Estimate",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:04:04+00:00",
+            "updated_at": "2026-04-28T20:04:04+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110448/omnicom-group-q1-adj-eps-1-90-beats-1-85-estimate-sales-6-243b-beat-5-712b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "OMC"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.650281+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.650281+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 251649,
+            "is_content_present": false
+          },
+          {
+            "id": 52110422,
+            "headline": "National Research Q1 Adj. EPS $0.21 Down From $0.25 YoY, Sales $34.803M Up From $33.551M YoY",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:03:44+00:00",
+            "updated_at": "2026-04-28T20:03:45+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110422/national-research-q1-adj-eps-0-21-down-from-0-25-yoy-sales-34-803m-up-from-33-551m-yoy",
+            "source": "benzinga",
+            "symbols": [
+              "NRC"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.644632+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.644632+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 271644,
+            "is_content_present": false
+          },
+          {
+            "id": 52110402,
+            "headline": "Why Baiya International Group (BIYA) Stock Is Skyrocketing Over 100% Tuesday",
+            "summary": "",
+            "author": "Henry Khederian",
+            "created_at": "2026-04-28T20:03:35+00:00",
+            "updated_at": "2026-04-28T20:03:36+00:00",
+            "url": "https://www.benzinga.com/trading-ideas/movers/26/04/52110402/why-baiya-international-group-biya-stock-is-skyrocketing-over-100-tuesday",
+            "source": "benzinga",
+            "symbols": [
+              "BIYA",
+              "BNBUSD",
+              "TRUMPUSD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.640497+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.640497+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 280639,
+            "is_content_present": false
+          },
+          {
+            "id": 52110388,
+            "headline": "CareDx Raises FY2026 Sales Guidance from $420.000M-$444.000M to $447.000M-$465.000M vs $436.665M Est",
+            "summary": "",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:03:27+00:00",
+            "updated_at": "2026-04-28T20:03:27+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52110388/caredx-raises-fy2026-sales-guidance-from-420-000m-444-000m-to-447-000m-465-000m-vs-436-665m-est",
+            "source": "benzinga",
+            "symbols": [
+              "CDNA"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.635086+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.635086+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 288633,
+            "is_content_present": false
+          }
+        ]
+      }
+    },
+    "get_recent_news[content]": {
+      "ok": true,
+      "result": {
+        "count": 5,
+        "articles": [
+          {
+            "id": 52117530,
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+            "author": "Aniket Verma",
+            "created_at": "2026-04-29T03:26:42+00:00",
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+            "source": "benzinga",
+            "symbols": [],
+            "first_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 2443900,
+            "is_content_present": true,
+            "content_text": "A judge dismissed on Tuesday rejected jailed cryptocurrency mogul Sam Bankman-Fried\u2019s request for a new trial, labelling the new evidence brought by him as \u201cwildly conspiratorial.\u201d Judge Questions SBF\u2019s Key Arguments Bankman-Fried, popularly known as SBF, filed a request for a new trial earlier in February, stating that Daniel Chapsky, former FTX head of partnerships, Ryan Salame , former FTX Digital Markets co-CEO, and Nishad Singh , former FTX engineering director, were \"threatened\" by the DOJ into silence or changing their statements. Judge Lewis Kaplan , who sentenced Bankman-Fried to 25 years in prison for the FTX scam, said that none of the witnesses were \u201cnewly discovered\u201d and that SBF was aware of them before the trial. \u201cHe could have obtained or at least sought to compel their testimony. But he did neither. His assertion that their absence [or, in one case, the decision of the witness to testify against him] was a product of government threats and retaliation is wildly conspiratorial and entirely contradicted by the record,\u201d the order said. Read Also: Sam Bankman-Fried Highlights How His Early Bets In Anthropic, SpaceX, Cursor Could Have Skyrocketed If Not Liquidated Interestingly, SBF retracted his motion for a new trial last week, expressing skepticism about receiving a \u201cfair hearing\u201d from Kaplan. The court also shot that request down. SBF\u2019s Attempts To Secure Trump\u2019s Pardon? The new motion followed SBF's claims that FTX was \"never bankrupt,\" blaming lawyers for filing a bogus bankruptcy case. However, court records and regulatory complaints describe FTX as deeply insolvent once the hidden deficit at sister trading firm, Alameda Research , came to light in late 2022. SBF was convicted of misappropriating funds from the exchange customers and using the money for personal expenses, political contributions and venture capital investments. Lately, SBF has been vocal in his support for Trump\u2019s policies , including those linked to the economy, foreign relations, and cryptocurrency. Trump has indicated he has no intention of pardoning him. Read Also: Elon Musk Calls Sam Altman 'Scam'\u2014And Crypto's Most Famous Detective Presents Evidence Disclaimer : This content was partially produced with the help of AI tools and was reviewed and published by Benzinga editors. Photo courtesy: Shutterstock"
+          },
+          {
+            "id": 52111114,
+            "headline": "Rogers Sees Q2 Adj EPS $0.90-$1.10 vs $0.79 Est; Sees Sales $210.000M-$220.000M vs $210.900M Est",
+            "summary": "Rogers (NYSE:ROG) is looking for Q2 Adj EPS of $0.90-$1.10 vs $0.79 analyst estimate. sees sales of $210.000 million-$220.000 million vs $210.900 million analyst estimate.",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:09:16+00:00",
+            "updated_at": "2026-04-28T20:09:17+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111114/rogers-sees-q2-adj-eps-0-90-1-10-vs-0-79-est-sees-sales-210-000m-220-000m-vs-210-900m-est",
+            "source": "benzinga",
+            "symbols": [
+              "ROG"
+            ],
+            "first_seen_at": "2026-04-28T20:09:02.497315+00:00",
+            "last_seen_at": "2026-04-28T20:09:02.497315+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13504,
+            "is_content_present": true,
+            "content_text": "Rogers (NYSE: ROG ) is looking for Q2 Adj EPS of $0.90-$1.10 vs $0.79 analyst estimate. sees sales of $210.000 million-$220.000 million vs $210.900 million analyst estimate."
+          },
+          {
+            "id": 52111106,
+            "headline": "InvenTrust Properties Raises FY2026 FFO Guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 Est",
+            "summary": "InvenTrust Properties (NYSE:IVT) raises FY2026 FFO guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 analyst estimate..",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:09:12+00:00",
+            "updated_at": "2026-04-28T20:09:12+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111106/inventrust-properties-raises-fy2026-ffo-guidance-from-1-91-1-95-to-1-92-1-96-vs-1-95-est",
+            "source": "benzinga",
+            "symbols": [
+              "IVT"
+            ],
+            "first_seen_at": "2026-04-28T20:08:57.940443+00:00",
+            "last_seen_at": "2026-04-28T20:08:57.940443+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -14060,
+            "is_content_present": true,
+            "content_text": "InvenTrust Properties (NYSE: IVT ) raises FY2026 FFO guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 analyst estimate.."
+          },
+          {
+            "id": 52111078,
+            "headline": "Tom Lee&#39;s $235M Ethereum Purchase Could Signal The End Of The Crypto Winter",
+            "summary": "Bitmine Immersion Technologies (NYSE:BMNR), a firm tied to Wall Street strategist Tom Lee, has just purchased roughly $233 million worth of Ethereum ",
+            "author": "Isaac Olaosegba",
+            "created_at": "2026-04-28T20:09:01+00:00",
+            "updated_at": "2026-04-28T20:09:02+00:00",
+            "url": "https://www.benzinga.com/Opinion/26/04/52111078/tom-lees-235m-ethereum-purchase-could-signal-the-end-of-the-crypto-winter",
+            "source": "benzinga",
+            "symbols": [
+              "BMNR",
+              "ETHUSD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13312,
+            "is_content_present": true,
+            "content_text": "Bitmine Immersion Technologies (NYSE: BMNR ) , a firm tied to Wall Street strategist Tom Lee, has just purchased roughly $233 million worth of Ethereum (CRYPTO: ETH ) . That is more than 100,000 ETH added in a single move, and it stands as one of the largest corporate Ethereum buys we have seen this year. When one of Wall Street\u2019s most respected voices puts such a huge amount into a single asset in seven days, it's a clear statement. BitMine Just Cornered 4% of Ethereum\u2019s Entire Supply Since december, 2025, this is the largest weekly ethereum purchase. Right now, BitMine Immersion Technologies hold close to 4% of the entire ethereum supply with nearly 5 million ETH tokens sitting in its balance sheet. Bitmine is not jumping in and out of Ethereum with the aim to catch short-term price swings. The company has been building its position steadily, and this latest purchase is just another step in that direction. The message behind this massive move is simple: tom lee believes ethereum will be worth a lot more over time, and investors shouldn't take this signal likely. While many believe the crypto winter may last through the fall of 2026, Lee's view is slightly different. He believes that the next bull run is right around the corner. Comin from someone with an indismissable track record, this isn't just another \"mere\" prediction. Right now, Ethereum isn't just another cryptocurrency. It's fast becoming a major infracstructure for the next phase of global finance. The Quiet Profit Engine Behind BitMine\u2019s Ethereum Strategy BitMine has staked more than 3 million ETH, approximately two-thirds of its total holdings, which is estimated to generate roughly $300 million in annualised staking revenue. That means the company does not need ETH\u2019s price to explode tomorrow to justify its position. The asset is already paying them while they wait. This transforms the investment thesis entirely. BitMine is running a yield-generating Ethereum treasury that produces hundreds of millions in annual revenue regardless of short-term price movement. That is a fundamentally different risk profile from buying ETH and hoping it goes up. Even with the unrealized loss of more than $6 billion, the company still continues to buy aggressively while passively earning over $200 million in staking revenue. BitMine Is Now Buying Ethereum Directly From Its Creators Layered on top of the weekly purchase is a separate transaction that deserves its own attention. The Ethereum Foundation finalised a deal to sell 10,000 ETH directly to BitMine at an average price of $2,387, marking the second time the Foundation has sold ETH to BitMine directly through an over-the-counter transaction. When the organisation that oversees Ethereum\u2019s development is selling directly to you, it signals a level of institutional credibility that goes beyond standard market purchases. The Ethereum Foundation does not sell to just anyone. The fact that BitMine has now become a repeat direct buyer from the Foundation is a detail that the broader market appears to be underpricing. What This Means for ETH Investors Right Now The largest institutional holder of Ethereum is accelerating its buying pace, generating hundreds of millions in staking income, buying directly from the Ethereum Foundation, and publicly calling the bottom of the current crypto downturn. Every one of those data points points in the same direction. Since 2018, Ethereum has experienced eight separate declines of 50% or more from recent highs and has staged a V-shaped recovery after each one. Lee has noted that in 2025, ETH fell 64% between January and March before rallying to nearly $5,000. If that pattern holds, the investors who are sitting on the sidelines waiting for certainty before buying will be the ones explaining why they missed it. Benzinga Disclaimer: This article is from an unpaid external contributor. It does not represent Benzinga\u2019s reporting and has not been edited for content or accuracy."
+          },
+          {
+            "id": 52111065,
+            "headline": "OPKO Health Sees Q2 Sales $127.000M-$132.000M vs $136.329M Est",
+            "summary": "OPKO Health (NASDAQ:OPK) sees Q2 sales of $127.000 million-$132.000 million vs $136.329 million analyst estimate.",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:55+00:00",
+            "updated_at": "2026-04-28T20:08:56+00:00",
+            "url": "https://www.benzinga.com/news/26/04/52111065/opko-health-sees-q2-sales-127-000m-132-000m-vs-136-329m-est",
+            "source": "benzinga",
+            "symbols": [
+              "OPK"
+            ],
+            "first_seen_at": "2026-04-28T20:08:41.759325+00:00",
+            "last_seen_at": "2026-04-28T20:08:41.759325+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13243,
+            "is_content_present": true,
+            "content_text": "OPKO Health (NASDAQ: OPK ) sees Q2 sales of $127.000 million-$132.000 million vs $136.329 million analyst estimate."
+          }
+        ]
+      }
+    },
+    "get_recent_news[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 200,
+        "requested": 1000
+      }
+    },
+    "get_recent_news[symbols]": {
+      "ok": true,
+      "result": {
+        "count": 3,
+        "articles": [
+          {
+            "id": 52109869,
+            "headline": "Amazon Q1 Preview: Stock Has Fallen After Four Of Last Five Earnings Reports, Could A Double Beat Reverse Trend?",
+            "summary": "AI, AWS and entertainment could be top items for investors to watch in the upcoming Amazon earnings report. Here&#39;s what to expect.",
+            "author": "Chris Katje",
+            "created_at": "2026-04-28T19:52:48+00:00",
+            "updated_at": "2026-04-28T19:52:49+00:00",
+            "url": "https://www.benzinga.com/trading-ideas/previews/26/04/52109869/amazon-q1-preview-stock-has-fallen-after-four-of-last-five-earnings-reports-could-a-double-beat-reverse-trend",
+            "source": "benzinga",
+            "symbols": [
+              "AMZN",
+              "DIA",
+              "SPY"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.510984+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.510984+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 927503,
+            "is_content_present": true
+          },
+          {
+            "id": 52109557,
+            "headline": "Stock Market Today: S&P 500 Drops Amid Tech Sell-Off, Oil Climbs To $100 On Hormuz Drama",
+            "summary": "Tech stocks slide as OpenAI&#39;s user growth miss reignites AI capex skepticism, while oil rallies above $99 and the Fed&#39;s two-day meeting kicks off.",
+            "author": "Piero Cingari",
+            "created_at": "2026-04-28T19:43:50+00:00",
+            "updated_at": "2026-04-28T19:43:50+00:00",
+            "url": "https://www.benzinga.com/markets/equities/26/04/52109557/sp-500-tech-falls-oil-rallies-hormuz-markets-tuesday",
+            "source": "benzinga",
+            "symbols": [
+              "ARE",
+              "CNC",
+              "DIA",
+              "GLW",
+              "GOOGL",
+              "GTLB",
+              "IWM",
+              "JPM",
+              "KO",
+              "MAN",
+              "META",
+              "MOH",
+              "MSFT",
+              "NVDA",
+              "QGEN",
+              "QQQ",
+              "RVMD",
+              "SFD",
+              "SOXX",
+              "SPOT",
+              "UNH",
+              "VOO",
+              "XLE",
+              "XLK",
+              "XLP",
+              "ZBH"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.440261+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.440261+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 1465426,
+            "is_content_present": true
+          },
+          {
+            "id": 52108466,
+            "headline": "Fed Meeting Preview: Powell's Last Hawkish Stand?",
+            "summary": "Powell&#39;s likely final FOMC press conference will probably deliver a hawkish hold as Hormuz keeps inflation risks alive and doves quietly turn.",
+            "author": "Piero Cingari",
+            "created_at": "2026-04-28T19:13:20+00:00",
+            "updated_at": "2026-04-28T19:13:21+00:00",
+            "url": "https://www.benzinga.com/analyst-stock-ratings/analyst-color/26/04/52108466/fed-meeting-preview-powells-last-hawkish-stand",
+            "source": "benzinga",
+            "symbols": [
+              "SPY"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.096305+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.096305+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 3295091,
+            "is_content_present": true
+          }
+        ]
+      }
+    },
+    "get_news_article": {
+      "ok": true,
+      "result": {
+        "id": 52117530,
+        "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+        "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+        "author": "Aniket Verma",
+        "created_at": "2026-04-29T03:26:42+00:00",
+        "updated_at": "2026-04-29T03:26:42+00:00",
+        "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+        "source": "benzinga",
+        "symbols": [],
+        "first_seen_at": "2026-04-29T04:07:25.904161+00:00",
+        "last_seen_at": "2026-04-29T04:07:25.904161+00:00",
+        "last_seen_source": "rest",
+        "update_count": 0,
+        "latency_ms": 2443900,
+        "is_content_present": true,
+        "content_text": "A judge dismissed on Tuesday rejected jailed cryptocurrency mogul Sam Bankman-Fried\u2019s request for a new trial, labelling the new evidence brought by him as \u201cwildly conspiratorial.\u201d Judge Questions SBF\u2019s Key Arguments Bankman-Fried, popularly known as SBF, filed a request for a new trial earlier in February, stating that Daniel Chapsky, former FTX head of partnerships, Ryan Salame , former FTX Digital Markets co-CEO, and Nishad Singh , former FTX engineering director, were \"threatened\" by the DOJ into silence or changing their statements. Judge Lewis Kaplan , who sentenced Bankman-Fried to 25 years in prison for the FTX scam, said that none of the witnesses were \u201cnewly discovered\u201d and that SBF was aware of them before the trial. \u201cHe could have obtained or at least sought to compel their testimony. But he did neither. His assertion that their absence [or, in one case, the decision of the witness to testify against him] was a product of government threats and retaliation is wildly conspiratorial and entirely contradicted by the record,\u201d the order said. Read Also: Sam Bankman-Fried Highlights How His Early Bets In Anthropic, SpaceX, Cursor Could Have Skyrocketed If Not Liquidated Interestingly, SBF retracted his motion for a new trial last week, expressing skepticism about receiving a \u201cfair hearing\u201d from Kaplan. The court also shot that request down. SBF\u2019s Attempts To Secure Trump\u2019s Pardon? The new motion followed SBF's claims that FTX was \"never bankrupt,\" blaming lawyers for filing a bogus bankruptcy case. However, court records and regulatory complaints describe FTX as deeply insolvent once the hidden deficit at sister trading firm, Alameda Research , came to light in late 2022. SBF was convicted of misappropriating funds from the exchange customers and using the money for personal expenses, political contributions and venture capital investments. Lately, SBF has been vocal in his support for Trump\u2019s policies , including those linked to the economy, foreign relations, and cryptocurrency. Trump has indicated he has no intention of pardoning him. Read Also: Elon Musk Calls Sam Altman 'Scam'\u2014And Crypto's Most Famous Detective Presents Evidence Disclaimer : This content was partially produced with the help of AI tools and was reviewed and published by Benzinga editors. Photo courtesy: Shutterstock",
+        "versions": [
+          {
+            "version_id": "75fd01ed-cc5f-42e9-9d16-286865e24f3e",
+            "article_id": 52117530,
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "received_at": "2026-04-29T04:07:25.900590+00:00",
+            "source": "rest",
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+            "content_hash": "6babb634fc110466c1f09380f591f5810d89ecdca50571e022cb005427a4ea6f"
+          }
+        ]
+      }
+    },
+    "get_news_article[missing]": {
+      "ok": true,
+      "result": {
+        "error": "not_found",
+        "article_id": -1
+      }
+    },
+    "search_news": {
+      "ok": true,
+      "result": {
+        "count": 10,
+        "articles": [
+          {
+            "id": 52117530,
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+            "author": "Aniket Verma",
+            "created_at": "2026-04-29T03:26:42+00:00",
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+            "source": "benzinga",
+            "symbols": [],
+            "first_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_at": "2026-04-29T04:07:25.904161+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 2443900,
+            "is_content_present": true
+          },
+          {
+            "id": 52111078,
+            "headline": "Tom Lee&#39;s $235M Ethereum Purchase Could Signal The End Of The Crypto Winter",
+            "summary": "Bitmine Immersion Technologies (NYSE:BMNR), a firm tied to Wall Street strategist Tom Lee, has just purchased roughly $233 million worth of Ethereum ",
+            "author": "Isaac Olaosegba",
+            "created_at": "2026-04-28T20:09:01+00:00",
+            "updated_at": "2026-04-28T20:09:02+00:00",
+            "url": "https://www.benzinga.com/Opinion/26/04/52111078/tom-lees-235m-ethereum-purchase-could-signal-the-end-of-the-crypto-winter",
+            "source": "benzinga",
+            "symbols": [
+              "BMNR",
+              "ETHUSD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_at": "2026-04-28T20:08:47.690830+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13312,
+            "is_content_present": true
+          },
+          {
+            "id": 52111057,
+            "headline": "Robinhood Markets Q1 EPS $0.38 Misses $0.46 Estimate, Sales $1.067B Miss $1.181B Estimate",
+            "summary": "Robinhood Markets (NASDAQ:HOOD) reported quarterly earnings of $0.38 per share which missed the analyst consensus estimate of $0.46 by 17.39 percent. This is a 2.7 percent increase over earnings of $0.37 per share from",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:52+00:00",
+            "updated_at": "2026-04-28T20:08:53+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52111057/robinhood-markets-q1-eps-0-38-misses-0-46-estimate-sales-1-067b-miss-1-181b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "HOOD"
+            ],
+            "first_seen_at": "2026-04-28T20:08:38.366399+00:00",
+            "last_seen_at": "2026-04-28T20:08:38.366399+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13635,
+            "is_content_present": true
+          },
+          {
+            "id": 52111044,
+            "headline": "PPG Indus Q1 Adj. EPS $1.83 Beats $1.77 Estimate, Sales $3.930B Beat $3.850B Estimate",
+            "summary": "PPG Indus (NYSE:PPG) reported quarterly earnings of $1.83 per share which beat the analyst consensus estimate of $1.77 by 3.39 percent. This is a 6.4 percent increase over earnings of $1.72 per share from the same period",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:48+00:00",
+            "updated_at": "2026-04-28T20:08:48+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52111044/ppg-indus-q1-adj-eps-1-83-beats-1-77-estimate-sales-3-930b-beat-3-850b-estimate",
+            "source": "benzinga",
+            "symbols": [
+              "PPG"
+            ],
+            "first_seen_at": "2026-04-28T20:08:34.008777+00:00",
+            "last_seen_at": "2026-04-28T20:08:34.008777+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13993,
+            "is_content_present": true
+          },
+          {
+            "id": 52110999,
+            "headline": "Rogers Q1 Adj. EPS $0.75 Beats $0.68 Estimate, Sales $200.500M Inline",
+            "summary": "Rogers (NYSE:ROG) reported quarterly earnings of $0.75 per share which beat the analyst consensus estimate of $0.68 by 10.29 percent. This is a 177.78 percent increase over earnings of $0.27 per share from the same",
+            "author": "Benzinga Newsdesk",
+            "created_at": "2026-04-28T20:08:32+00:00",
+            "updated_at": "2026-04-28T20:08:32+00:00",
+            "url": "https://www.benzinga.com/news/earnings/26/04/52110999/rogers-q1-adj-eps-0-75-beats-0-68-estimate-sales-200-500m-inline",
+            "source": "benzinga",
+            "symbols": [
+              "ROG"
+            ],
+            "first_seen_at": "2026-04-28T20:08:18.029240+00:00",
+            "last_seen_at": "2026-04-28T20:08:18.029240+00:00",
+            "last_seen_source": "ws",
+            "update_count": 0,
+            "latency_ms": -13971,
+            "is_content_present": true
+          },
+          {
+            "id": 52110163,
+            "headline": "If You Invested $1000 In Direxion Daily Semiconductor Bull 3X ETF Stock 15 Years Ago, You Would Have This Much Today",
+            "summary": " ",
+            "author": "Benzinga Insights",
+            "created_at": "2026-04-28T20:00:30+00:00",
+            "updated_at": "2026-04-28T20:00:31+00:00",
+            "url": "https://www.benzinga.com/insights/news/26/04/52110163/if-you-invested-1000-in-direxion-daily-semiconductor-bull-3x-etf-stock-15-years-ago-you-would-have-",
+            "source": "benzinga",
+            "symbols": [
+              "SOXL"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.580245+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.580245+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 465577,
+            "is_content_present": true
+          },
+          {
+            "id": 52109869,
+            "headline": "Amazon Q1 Preview: Stock Has Fallen After Four Of Last Five Earnings Reports, Could A Double Beat Reverse Trend?",
+            "summary": "AI, AWS and entertainment could be top items for investors to watch in the upcoming Amazon earnings report. Here&#39;s what to expect.",
+            "author": "Chris Katje",
+            "created_at": "2026-04-28T19:52:48+00:00",
+            "updated_at": "2026-04-28T19:52:49+00:00",
+            "url": "https://www.benzinga.com/trading-ideas/previews/26/04/52109869/amazon-q1-preview-stock-has-fallen-after-four-of-last-five-earnings-reports-could-a-double-beat-reverse-trend",
+            "source": "benzinga",
+            "symbols": [
+              "AMZN",
+              "DIA",
+              "SPY"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.510984+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.510984+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 927503,
+            "is_content_present": true
+          },
+          {
+            "id": 52109784,
+            "headline": "BNB Gets A Turbo Boost: Trucrium's New ETF Bets 2X On Binance Coin's Daily Moves",
+            "summary": "Teucrium and xETFs have rolled out a new leveraged crypto-linked product, launching the Teucrium xETFs 2x Long Daily BNB ETF (NYSE:XBNB) on ",
+            "author": "Chandrima Sanyal",
+            "created_at": "2026-04-28T19:50:48+00:00",
+            "updated_at": "2026-04-28T19:50:49+00:00",
+            "url": "https://www.benzinga.com/etfs/new-etfs/26/04/52109784/bnb-gets-a-turbo-boost-trucriums-new-etf-bets-2x-on-binance-coins-daily-moves",
+            "source": "benzinga",
+            "symbols": [
+              "BNBUSD",
+              "XBNB"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.494222+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.494222+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 1047486,
+            "is_content_present": true
+          },
+          {
+            "id": 52109615,
+            "headline": "Why SoundHound AI Shares Are Trending Lower Tuesday",
+            "summary": "SoundHound AI Inc (NASDAQ:SOUN) shares edged lower Tuesday as traders weighed its LivePerson deal amid cooling tech risk appetite.",
+            "author": "Henry Khederian",
+            "created_at": "2026-04-28T19:45:20+00:00",
+            "updated_at": "2026-04-28T19:45:20+00:00",
+            "url": "https://www.benzinga.com/trading-ideas/movers/26/04/52109615/why-soundhound-ai-shares-are-trending-lower-tuesday",
+            "source": "benzinga",
+            "symbols": [
+              "SOUN"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.469279+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.469279+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 1375463,
+            "is_content_present": true
+          },
+          {
+            "id": 52109557,
+            "headline": "Stock Market Today: S&P 500 Drops Amid Tech Sell-Off, Oil Climbs To $100 On Hormuz Drama",
+            "summary": "Tech stocks slide as OpenAI&#39;s user growth miss reignites AI capex skepticism, while oil rallies above $99 and the Fed&#39;s two-day meeting kicks off.",
+            "author": "Piero Cingari",
+            "created_at": "2026-04-28T19:43:50+00:00",
+            "updated_at": "2026-04-28T19:43:50+00:00",
+            "url": "https://www.benzinga.com/markets/equities/26/04/52109557/sp-500-tech-falls-oil-rallies-hormuz-markets-tuesday",
+            "source": "benzinga",
+            "symbols": [
+              "ARE",
+              "CNC",
+              "DIA",
+              "GLW",
+              "GOOGL",
+              "GTLB",
+              "IWM",
+              "JPM",
+              "KO",
+              "MAN",
+              "META",
+              "MOH",
+              "MSFT",
+              "NVDA",
+              "QGEN",
+              "QQQ",
+              "RVMD",
+              "SFD",
+              "SOXX",
+              "SPOT",
+              "UNH",
+              "VOO",
+              "XLE",
+              "XLK",
+              "XLP",
+              "ZBH"
+            ],
+            "first_seen_at": "2026-04-28T20:08:15.440261+00:00",
+            "last_seen_at": "2026-04-28T20:08:15.440261+00:00",
+            "last_seen_source": "rest",
+            "update_count": 0,
+            "latency_ms": 1465426,
+            "is_content_present": true
+          }
+        ]
+      }
+    },
+    "search_news[empty]": {
+      "ok": true,
+      "result": {
+        "error": "empty_query"
+      }
+    },
+    "search_news[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 200,
+        "requested": 10000
+      }
+    },
+    "get_news_for_symbols": {
+      "ok": true,
+      "result": {
+        "symbols": {
+          "AAPL": [],
+          "MSFT": [
+            {
+              "id": 52109557,
+              "headline": "Stock Market Today: S&P 500 Drops Amid Tech Sell-Off, Oil Climbs To $100 On Hormuz Drama",
+              "summary": "Tech stocks slide as OpenAI&#39;s user growth miss reignites AI capex skepticism, while oil rallies above $99 and the Fed&#39;s two-day meeting kicks off.",
+              "author": "Piero Cingari",
+              "created_at": "2026-04-28T19:43:50+00:00",
+              "updated_at": "2026-04-28T19:43:50+00:00",
+              "url": "https://www.benzinga.com/markets/equities/26/04/52109557/sp-500-tech-falls-oil-rallies-hormuz-markets-tuesday",
+              "source": "benzinga",
+              "symbols": [
+                "ARE",
+                "CNC",
+                "DIA",
+                "GLW",
+                "GOOGL",
+                "GTLB",
+                "IWM",
+                "JPM",
+                "KO",
+                "MAN",
+                "META",
+                "MOH",
+                "MSFT",
+                "NVDA",
+                "QGEN",
+                "QQQ",
+                "RVMD",
+                "SFD",
+                "SOXX",
+                "SPOT",
+                "UNH",
+                "VOO",
+                "XLE",
+                "XLK",
+                "XLP",
+                "ZBH"
+              ],
+              "first_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_source": "rest",
+              "update_count": 0,
+              "latency_ms": 1465426,
+              "is_content_present": true
+            }
+          ],
+          "NVDA": [
+            {
+              "id": 52109557,
+              "headline": "Stock Market Today: S&P 500 Drops Amid Tech Sell-Off, Oil Climbs To $100 On Hormuz Drama",
+              "summary": "Tech stocks slide as OpenAI&#39;s user growth miss reignites AI capex skepticism, while oil rallies above $99 and the Fed&#39;s two-day meeting kicks off.",
+              "author": "Piero Cingari",
+              "created_at": "2026-04-28T19:43:50+00:00",
+              "updated_at": "2026-04-28T19:43:50+00:00",
+              "url": "https://www.benzinga.com/markets/equities/26/04/52109557/sp-500-tech-falls-oil-rallies-hormuz-markets-tuesday",
+              "source": "benzinga",
+              "symbols": [
+                "ARE",
+                "CNC",
+                "DIA",
+                "GLW",
+                "GOOGL",
+                "GTLB",
+                "IWM",
+                "JPM",
+                "KO",
+                "MAN",
+                "META",
+                "MOH",
+                "MSFT",
+                "NVDA",
+                "QGEN",
+                "QQQ",
+                "RVMD",
+                "SFD",
+                "SOXX",
+                "SPOT",
+                "UNH",
+                "VOO",
+                "XLE",
+                "XLK",
+                "XLP",
+                "ZBH"
+              ],
+              "first_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_source": "rest",
+              "update_count": 0,
+              "latency_ms": 1465426,
+              "is_content_present": true
+            }
+          ],
+          "TSLA": [],
+          "SPY": [
+            {
+              "id": 52109869,
+              "headline": "Amazon Q1 Preview: Stock Has Fallen After Four Of Last Five Earnings Reports, Could A Double Beat Reverse Trend?",
+              "summary": "AI, AWS and entertainment could be top items for investors to watch in the upcoming Amazon earnings report. Here&#39;s what to expect.",
+              "author": "Chris Katje",
+              "created_at": "2026-04-28T19:52:48+00:00",
+              "updated_at": "2026-04-28T19:52:49+00:00",
+              "url": "https://www.benzinga.com/trading-ideas/previews/26/04/52109869/amazon-q1-preview-stock-has-fallen-after-four-of-last-five-earnings-reports-could-a-double-beat-reverse-trend",
+              "source": "benzinga",
+              "symbols": [
+                "AMZN",
+                "DIA",
+                "SPY"
+              ],
+              "first_seen_at": "2026-04-28T20:08:15.510984+00:00",
+              "last_seen_at": "2026-04-28T20:08:15.510984+00:00",
+              "last_seen_source": "rest",
+              "update_count": 0,
+              "latency_ms": 927503,
+              "is_content_present": true
+            },
+            {
+              "id": 52108466,
+              "headline": "Fed Meeting Preview: Powell's Last Hawkish Stand?",
+              "summary": "Powell&#39;s likely final FOMC press conference will probably deliver a hawkish hold as Hormuz keeps inflation risks alive and doves quietly turn.",
+              "author": "Piero Cingari",
+              "created_at": "2026-04-28T19:13:20+00:00",
+              "updated_at": "2026-04-28T19:13:21+00:00",
+              "url": "https://www.benzinga.com/analyst-stock-ratings/analyst-color/26/04/52108466/fed-meeting-preview-powells-last-hawkish-stand",
+              "source": "benzinga",
+              "symbols": [
+                "SPY"
+              ],
+              "first_seen_at": "2026-04-28T20:08:15.096305+00:00",
+              "last_seen_at": "2026-04-28T20:08:15.096305+00:00",
+              "last_seen_source": "rest",
+              "update_count": 0,
+              "latency_ms": 3295091,
+              "is_content_present": true
+            }
+          ],
+          "QQQ": [
+            {
+              "id": 52109557,
+              "headline": "Stock Market Today: S&P 500 Drops Amid Tech Sell-Off, Oil Climbs To $100 On Hormuz Drama",
+              "summary": "Tech stocks slide as OpenAI&#39;s user growth miss reignites AI capex skepticism, while oil rallies above $99 and the Fed&#39;s two-day meeting kicks off.",
+              "author": "Piero Cingari",
+              "created_at": "2026-04-28T19:43:50+00:00",
+              "updated_at": "2026-04-28T19:43:50+00:00",
+              "url": "https://www.benzinga.com/markets/equities/26/04/52109557/sp-500-tech-falls-oil-rallies-hormuz-markets-tuesday",
+              "source": "benzinga",
+              "symbols": [
+                "ARE",
+                "CNC",
+                "DIA",
+                "GLW",
+                "GOOGL",
+                "GTLB",
+                "IWM",
+                "JPM",
+                "KO",
+                "MAN",
+                "META",
+                "MOH",
+                "MSFT",
+                "NVDA",
+                "QGEN",
+                "QQQ",
+                "RVMD",
+                "SFD",
+                "SOXX",
+                "SPOT",
+                "UNH",
+                "VOO",
+                "XLE",
+                "XLK",
+                "XLP",
+                "ZBH"
+              ],
+              "first_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_at": "2026-04-28T20:08:15.440261+00:00",
+              "last_seen_source": "rest",
+              "update_count": 0,
+              "latency_ms": 1465426,
+              "is_content_present": true
+            }
+          ]
+        }
+      }
+    },
+    "get_news_for_symbols[empty]": {
+      "ok": true,
+      "result": {
+        "error": "no_symbols"
+      }
+    },
+    "get_news_for_symbols[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 200,
+        "requested": 9999
+      }
+    },
+    "get_breaking_news_digest": {
+      "ok": true,
+      "result": {
+        "count": 1,
+        "articles": [
+          {
+            "id": 52117530,
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "symbols": [],
+            "source": "benzinga",
+            "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses."
+          }
+        ]
+      }
+    },
+    "get_breaking_news_digest[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 25,
+        "requested": 9999
+      }
+    },
+    "get_interest_symbols": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [
+          "AAPL",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ]
+      }
+    },
+    "set_interest_symbols[add]": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [
+          "AAPL",
+          "AMZN",
+          "GOOGL",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "mode": "add"
+      }
+    },
+    "set_interest_symbols[remove]": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [
+          "AAPL",
+          "AMZN",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "mode": "remove"
+      }
+    },
+    "set_interest_symbols[replace]": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [
+          "AAPL",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "mode": "replace"
+      }
+    },
+    "set_interest_symbols[clear]": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [],
+        "mode": "clear"
+      }
+    },
+    "set_interest_symbols[restore]": {
+      "ok": true,
+      "result": {
+        "interest_symbols": [
+          "AAPL",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "mode": "replace"
+      }
+    },
+    "set_interest_symbols[bad_mode]": {
+      "ok": true,
+      "result": {
+        "error": "invalid_mode",
+        "mode": "bogus"
+      }
+    },
+    "get_news_alerts": {
+      "ok": true,
+      "result": {
+        "count": 25,
+        "alerts": [
+          {
+            "alert_id": "2f177736-06a7-4215-b431-a5b56ab190fe",
+            "article_id": 52117530,
+            "created_at": "2026-04-29T04:07:25.913538+00:00",
+            "severity": "critical",
+            "category": "halt_risk_keyword",
+            "symbols": [],
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "reason": "keyword match in halt_risk: bankruptcy",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "b211de51-79d1-411a-a144-60a095e18fa6",
+            "article_id": 52117530,
+            "created_at": "2026-04-29T04:07:25.912392+00:00",
+            "severity": "low",
+            "category": "legal_regulatory_keyword",
+            "symbols": [],
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "reason": "keyword match in legal_regulatory: doj",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "5aa7ba6c-d6a7-445d-b98f-0a67ee67ee81",
+            "article_id": 52111114,
+            "created_at": "2026-04-28T20:09:02.502456+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "ROG"
+            ],
+            "headline": "Rogers Sees Q2 Adj EPS $0.90-$1.10 vs $0.79 Est; Sees Sales $210.000M-$220.000M vs $210.900M Est",
+            "reason": "keyword match in earnings: eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "d404a96c-cbc6-48ac-8961-c48874d41f8d",
+            "article_id": 52111106,
+            "created_at": "2026-04-28T20:08:57.945737+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "IVT"
+            ],
+            "headline": "InvenTrust Properties Raises FY2026 FFO Guidance from $1.91-$1.95 to $1.92-$1.96 vs $1.95 Est",
+            "reason": "keyword match in earnings: guidance",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "2dc76aec-ff90-465d-96a0-2d0e326954bc",
+            "article_id": 52111078,
+            "created_at": "2026-04-28T20:08:47.695974+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "BMNR",
+              "ETHUSD"
+            ],
+            "headline": "Tom Lee&#39;s $235M Ethereum Purchase Could Signal The End Of The Crypto Winter",
+            "reason": "keyword match in earnings: revenue",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "a3e3ac6e-1195-4e40-8347-8302aa652ae5",
+            "article_id": 52111078,
+            "created_at": "2026-04-28T20:08:47.694779+00:00",
+            "severity": "high",
+            "category": "mna_keyword",
+            "symbols": [
+              "BMNR",
+              "ETHUSD"
+            ],
+            "headline": "Tom Lee&#39;s $235M Ethereum Purchase Could Signal The End Of The Crypto Winter",
+            "reason": "keyword match in mna: deal",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "1da75dc8-ccac-4197-96c8-2d047d1b3d7c",
+            "article_id": 52111057,
+            "created_at": "2026-04-28T20:08:38.369598+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "HOOD"
+            ],
+            "headline": "Robinhood Markets Q1 EPS $0.38 Misses $0.46 Estimate, Sales $1.067B Miss $1.181B Estimate",
+            "reason": "keyword match in earnings: earnings, eps, misses",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "8657c6bf-ff6b-4cac-a80d-fd220569b056",
+            "article_id": 52111044,
+            "created_at": "2026-04-28T20:08:34.013644+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "PPG"
+            ],
+            "headline": "PPG Indus Q1 Adj. EPS $1.83 Beats $1.77 Estimate, Sales $3.930B Beat $3.850B Estimate",
+            "reason": "keyword match in earnings: beats, earnings, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "107e8026-4a15-4b25-9889-e8db899f211f",
+            "article_id": 52110999,
+            "created_at": "2026-04-28T20:08:18.032318+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "ROG"
+            ],
+            "headline": "Rogers Q1 Adj. EPS $0.75 Beats $0.68 Estimate, Sales $200.500M Inline",
+            "reason": "keyword match in earnings: beats, earnings, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "3ce41299-b76e-4193-9a3a-0b07740e8635",
+            "article_id": 52110706,
+            "created_at": "2026-04-28T20:08:15.720400+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "WELL"
+            ],
+            "headline": "Welltower Q1 FFO $1.47 Beats $1.44 Estimate, Sales $3.352B Beat $3.163B Estimate",
+            "reason": "latency_ms=117715 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "821db612-fab5-4f8e-a32b-38ce0f1f0056",
+            "article_id": 52110706,
+            "created_at": "2026-04-28T20:08:15.720189+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "WELL"
+            ],
+            "headline": "Welltower Q1 FFO $1.47 Beats $1.44 Estimate, Sales $3.352B Beat $3.163B Estimate",
+            "reason": "keyword match in earnings: beats",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "9a91c735-ea3f-48ed-9e6f-23d69b20287c",
+            "article_id": 52110694,
+            "created_at": "2026-04-28T20:08:15.715068+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "KKR"
+            ],
+            "headline": "Dawson Partners Adds Asia Presence Amid Surging Private Credit Demand",
+            "reason": "latency_ms=121711 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "fb35a9b5-ccef-4645-9afe-059f29e017ba",
+            "article_id": 52110690,
+            "created_at": "2026-04-28T20:08:15.709409+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "MDLZ"
+            ],
+            "headline": "Mondelez International Q1 Adj. EPS $0.67 Beats $0.61 Estimate, Sales $10.080B Beat $9.753B Estimate",
+            "reason": "latency_ms=125705 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "fada4efc-b0fb-45e4-9189-59a761c3602c",
+            "article_id": 52110690,
+            "created_at": "2026-04-28T20:08:15.709233+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "MDLZ"
+            ],
+            "headline": "Mondelez International Q1 Adj. EPS $0.67 Beats $0.61 Estimate, Sales $10.080B Beat $9.753B Estimate",
+            "reason": "keyword match in earnings: beats, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "48c08c67-aecd-48cb-9c54-58fa31e1aded",
+            "article_id": 52110679,
+            "created_at": "2026-04-28T20:08:15.703247+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "FFIV"
+            ],
+            "headline": "F5 Q2 Adj. EPS $3.90 Beats $3.44 Estimate, Sales $811.700M Beat $779.383M Estimate",
+            "reason": "latency_ms=129699 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "95df95d1-e9c7-4ad5-8a27-2a918e1a8b87",
+            "article_id": 52110679,
+            "created_at": "2026-04-28T20:08:15.703041+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "FFIV"
+            ],
+            "headline": "F5 Q2 Adj. EPS $3.90 Beats $3.44 Estimate, Sales $811.700M Beat $779.383M Estimate",
+            "reason": "keyword match in earnings: beats, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "40565897-ddbe-49b6-be92-8a31275e09a0",
+            "article_id": 52110671,
+            "created_at": "2026-04-28T20:08:15.698114+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "OPK"
+            ],
+            "headline": "OPKO Health Q1 EPS $(0.07), Inline, Sales $124.200M Miss $130.514M Estimate",
+            "reason": "latency_ms=134694 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "fabf5d24-4f7b-4683-ab3c-1ee0b34efa37",
+            "article_id": 52110671,
+            "created_at": "2026-04-28T20:08:15.697830+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "OPK"
+            ],
+            "headline": "OPKO Health Q1 EPS $(0.07), Inline, Sales $124.200M Miss $130.514M Estimate",
+            "reason": "keyword match in earnings: eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "f4a8533e-b53b-4607-9410-d52e1c8e5c3e",
+            "article_id": 52110645,
+            "created_at": "2026-04-28T20:08:15.693475+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "LSTR"
+            ],
+            "headline": "Landstar System Q1 EPS $1.16 Beats $1.12 Estimate, Sales $1.171B Beat $1.156B Estimate",
+            "reason": "latency_ms=144690 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "ba22597f-0556-474b-8da9-ba5d146469b4",
+            "article_id": 52110645,
+            "created_at": "2026-04-28T20:08:15.693305+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "LSTR"
+            ],
+            "headline": "Landstar System Q1 EPS $1.16 Beats $1.12 Estimate, Sales $1.171B Beat $1.156B Estimate",
+            "reason": "keyword match in earnings: beats, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "45df7be3-14c9-4607-8ced-9a7ed45f5cc0",
+            "article_id": 52110642,
+            "created_at": "2026-04-28T20:08:15.688694+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "SBCF"
+            ],
+            "headline": "Seacoast Banking Q1 Adj. EPS $0.62 Beats $0.58 Estimate, Sales $163.856M Miss $205.494M Estimate",
+            "reason": "latency_ms=149684 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "1bf71084-c31c-4c35-9af4-88d198939586",
+            "article_id": 52110642,
+            "created_at": "2026-04-28T20:08:15.688355+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "SBCF"
+            ],
+            "headline": "Seacoast Banking Q1 Adj. EPS $0.62 Beats $0.58 Estimate, Sales $163.856M Miss $205.494M Estimate",
+            "reason": "keyword match in earnings: beats, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "6a6bc62e-1719-4dde-86fe-9fb5e355b027",
+            "article_id": 52110629,
+            "created_at": "2026-04-28T20:08:15.682663+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "CSGP"
+            ],
+            "headline": "CoStar Gr Q1 Adj. EPS $0.23 Beats $0.18 Estimate, Sales $897.000M Beat $896.773M Estimate",
+            "reason": "latency_ms=168679 exceeds threshold 30000",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "c64924fd-3fd2-4245-9522-dd0a546fec4f",
+            "article_id": 52110629,
+            "created_at": "2026-04-28T20:08:15.682456+00:00",
+            "severity": "high",
+            "category": "earnings_keyword",
+            "symbols": [
+              "CSGP"
+            ],
+            "headline": "CoStar Gr Q1 Adj. EPS $0.23 Beats $0.18 Estimate, Sales $897.000M Beat $896.773M Estimate",
+            "reason": "keyword match in earnings: beats, eps",
+            "acknowledged": false
+          },
+          {
+            "alert_id": "cfa80442-d59f-45b0-bfcb-6dce6e3a31cc",
+            "article_id": 52110593,
+            "created_at": "2026-04-28T20:08:15.677636+00:00",
+            "severity": "medium",
+            "category": "high_latency",
+            "symbols": [
+              "RBBN"
+            ],
+            "headline": "Ribbon Communications Sees Q2 Sales $185.000M-$195.000M vs $192.680M Est",
+            "reason": "latency_ms=180672 exceeds threshold 30000",
+            "acknowledged": false
+          }
+        ]
+      }
+    },
+    "get_news_alerts[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 500,
+        "requested": 99999
+      }
+    },
+    "ack_news_alert": {
+      "ok": true,
+      "result": {
+        "acknowledged": true,
+        "alert_id": "2f177736-06a7-4215-b431-a5b56ab190fe"
+      }
+    },
+    "get_news_symbol_map": {
+      "ok": true,
+      "result": {
+        "window_minutes": 1440,
+        "symbol_counts": {
+          "ARE": 2,
+          "BNBUSD": 2,
+          "CDNA": 2,
+          "DIA": 2,
+          "EXLS": 2,
+          "KKR": 2,
+          "MX": 2,
+          "OPK": 2,
+          "RBBN": 2,
+          "ROG": 2,
+          "SPY": 2,
+          "ABTC": 1,
+          "AMZN": 1,
+          "ARES": 1,
+          "BIYA": 1,
+          "BKNG": 1,
+          "BMNR": 1,
+          "BTCUSD": 1,
+          "BX": 1,
+          "CCEL": 1,
+          "CNC": 1,
+          "CRY": 1,
+          "CSGP": 1,
+          "CZR": 1,
+          "DIS": 1,
+          "E": 1,
+          "EONR": 1,
+          "ETHUSD": 1,
+          "FFIV": 1,
+          "GLW": 1,
+          "GOOGL": 1,
+          "GTLB": 1,
+          "HOOD": 1,
+          "IVT": 1,
+          "IWM": 1,
+          "JPM": 1,
+          "KO": 1,
+          "LSTR": 1,
+          "MAN": 1,
+          "MDLZ": 1,
+          "META": 1,
+          "MOH": 1,
+          "MSFT": 1,
+          "NRC": 1,
+          "NVDA": 1,
+          "OMC": 1,
+          "OWL": 1,
+          "PEB": 1,
+          "PPG": 1,
+          "PRCH": 1,
+          "QGEN": 1,
+          "QQQ": 1,
+          "RVMD": 1,
+          "SBCF": 1,
+          "SFD": 1,
+          "SOUN": 1,
+          "SOXL": 1,
+          "SOXX": 1,
+          "SPOT": 1,
+          "TMUS": 1,
+          "TRUMPUSD": 1,
+          "UNH": 1,
+          "VGK": 1,
+          "VOO": 1,
+          "WELL": 1,
+          "XBNB": 1,
+          "XEY": 1,
+          "XLE": 1,
+          "XLK": 1,
+          "XLP": 1,
+          "ZBH": 1
+        }
+      }
+    },
+    "get_news_latency_stats": {
+      "ok": true,
+      "result": {
+        "window_minutes": 60,
+        "sample_count": 1,
+        "p50_ms": 2443900,
+        "p90_ms": 2443900,
+        "p99_ms": 2443900,
+        "max_ms": 2443900,
+        "avg_ms": 2443900
+      }
+    },
+    "get_news_ingestion_stats": {
+      "ok": true,
+      "result": {
+        "window_minutes": 60,
+        "article_count": 1,
+        "version_count": 1,
+        "distinct_symbols": 0,
+        "distinct_sources": 1,
+        "raw_event_count": 0
+      }
+    },
+    "get_raw_news_events": {
+      "ok": true,
+      "result": {
+        "count": 0,
+        "events": []
+      }
+    },
+    "get_raw_news_events[oversize]": {
+      "ok": true,
+      "result": {
+        "error": "limit_exceeded",
+        "max_allowed": 500,
+        "requested": 99999
+      }
+    },
+    "get_news_versions": {
+      "ok": true,
+      "result": {
+        "article_id": 52117530,
+        "count": 1,
+        "versions": [
+          {
+            "version_id": "75fd01ed-cc5f-42e9-9d16-286865e24f3e",
+            "article_id": 52117530,
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "received_at": "2026-04-29T04:07:25.900590+00:00",
+            "source": "rest",
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+            "content_hash": "6babb634fc110466c1f09380f591f5810d89ecdca50571e022cb005427a4ea6f"
+          }
+        ]
+      }
+    },
+    "run_news_rest_backfill": {
+      "ok": true,
+      "result": {
+        "window_minutes": 60,
+        "articles": 1,
+        "pages": 1,
+        "status": "ok"
+      }
+    },
+    "run_news_rest_backfill[invalid]": {
+      "ok": true,
+      "result": {
+        "error": "invalid_minutes",
+        "min": 1,
+        "max": 10080
+      }
+    }
+  },
+  "resources": {
+    "alpaca-news://health": {
+      "ok": true,
+      "contents": [
+        {
+          "service": "alpaca-news-mcp",
+          "connected": true,
+          "authenticated": true,
+          "subscription_mode": "wildcard",
+          "requested_subscription": {
+            "news": [
+              "*"
+            ]
+          },
+          "acknowledged_subscription": {
+            "news": [
+              "*"
+            ]
+          },
+          "last_message_at": null,
+          "last_article_at": null,
+          "last_error": null,
+          "connection_attempts": 1,
+          "reconnect_count": 0,
+          "connection_limit_blocked": false,
+          "entitlement_error": false,
+          "rest_backfill_enabled": true,
+          "article_count": 1,
+          "alert_count": 2,
+          "articles_dropped": 0
+        }
+      ]
+    },
+    "alpaca-news://subscription": {
+      "ok": true,
+      "contents": [
+        {
+          "requested": {
+            "news": [
+              "*"
+            ]
+          },
+          "acknowledged": {
+            "news": [
+              "*"
+            ]
+          },
+          "mode": "wildcard",
+          "last_ack_at": "2026-04-29T04:07:26.087200+00:00",
+          "notes": null
+        }
+      ]
+    },
+    "alpaca-news://recent": {
+      "ok": true,
+      "contents": [
+        [
+          {
+            "id": 52117530,
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "symbols": [],
+            "source": "benzinga",
+            "updated_at": "2026-04-29T03:26:42+00:00",
+            "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial"
+          }
+        ]
+      ]
+    },
+    "alpaca-news://alerts": {
+      "ok": true,
+      "contents": [
+        [
+          {
+            "alert_id": "2f177736-06a7-4215-b431-a5b56ab190fe",
+            "article_id": 52117530,
+            "created_at": "2026-04-29T04:07:25.913538+00:00",
+            "severity": "critical",
+            "category": "halt_risk_keyword",
+            "symbols": [],
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "reason": "keyword match in halt_risk: bankruptcy",
+            "acknowledged": true
+          },
+          {
+            "alert_id": "b211de51-79d1-411a-a144-60a095e18fa6",
+            "article_id": 52117530,
+            "created_at": "2026-04-29T04:07:25.912392+00:00",
+            "severity": "low",
+            "category": "legal_regulatory_keyword",
+            "symbols": [],
+            "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+            "reason": "keyword match in legal_regulatory: doj",
+            "acknowledged": false
+          }
+        ]
+      ]
+    },
+    "alpaca-news://symbols": {
+      "ok": true,
+      "contents": [
+        {
+          "window_minutes": 60,
+          "symbol_counts": {}
+        }
+      ]
+    },
+    "alpaca-news://stats/latency": {
+      "ok": true,
+      "contents": [
+        {
+          "window_minutes": 60,
+          "sample_count": 1,
+          "p50_ms": 2624638,
+          "p90_ms": 2624638,
+          "p99_ms": 2624638,
+          "max_ms": 2624638,
+          "avg_ms": 2624638
+        }
+      ]
+    },
+    "alpaca-news://stats/ingestion": {
+      "ok": true,
+      "contents": [
+        {
+          "window_minutes": 60,
+          "article_count": 1,
+          "version_count": 1,
+          "distinct_symbols": 0,
+          "distinct_sources": 1,
+          "raw_event_count": 0
+        }
+      ]
+    },
+    "alpaca-news://symbols/AAPL": {
+      "ok": true,
+      "contents": [
+        []
+      ]
+    },
+    "alpaca-news://article/52117530": {
+      "ok": true,
+      "contents": [
+        {
+          "id": 52117530,
+          "headline": "Sam Bankman-Fried's Plea For New Trial Shut Down, Judge Says Allegations Of Government Threats 'Wildly Conspiratorial'",
+          "summary": "Judge denies SBF&#39;s request for new trial, calling his claims wildly conspiratorial. SBF had accused DOJ of threatening witnesses.",
+          "content_text": "A judge dismissed on Tuesday rejected jailed cryptocurrency mogul Sam Bankman-Fried\u2019s request for a new trial, labelling the new evidence brought by him as \u201cwildly conspiratorial.\u201d Judge Questions SBF\u2019s Key Arguments Bankman-Fried, popularly known as SBF, filed a request for a new trial earlier in February, stating that Daniel Chapsky, former FTX head of partnerships, Ryan Salame , former FTX Digital Markets co-CEO, and Nishad Singh , former FTX engineering director, were \"threatened\" by the DOJ into silence or changing their statements. Judge Lewis Kaplan , who sentenced Bankman-Fried to 25 years in prison for the FTX scam, said that none of the witnesses were \u201cnewly discovered\u201d and that SBF was aware of them before the trial. \u201cHe could have obtained or at least sought to compel their testimony. But he did neither. His assertion that their absence [or, in one case, the decision of the witness to testify against him] was a product of government threats and retaliation is wildly conspiratorial and entirely contradicted by the record,\u201d the order said. Read Also: Sam Bankman-Fried Highlights How His Early Bets In Anthropic, SpaceX, Cursor Could Have Skyrocketed If Not Liquidated Interestingly, SBF retracted his motion for a new trial last week, expressing skepticism about receiving a \u201cfair hearing\u201d from Kaplan. The court also shot that request down. SBF\u2019s Attempts To Secure Trump\u2019s Pardon? The new motion followed SBF's claims that FTX was \"never bankrupt,\" blaming lawyers for filing a bogus bankruptcy case. However, court records and regulatory complaints describe FTX as deeply insolvent once the hidden deficit at sister trading firm, Alameda Research , came to light in late 2022. SBF was convicted of misappropriating funds from the exchange customers and using the money for personal expenses, political contributions and venture capital investments. Lately, SBF has been vocal in his support for Trump\u2019s policies , including those linked to the economy, foreign relations, and cryptocurrency. Trump has indicated he has no intention of pardoning him. Read Also: Elon Musk Calls Sam Altman 'Scam'\u2014And Crypto's Most Famous Detective Presents Evidence Disclaimer : This content was partially produced with the help of AI tools and was reviewed and published by Benzinga editors. Photo courtesy: Shutterstock",
+          "symbols": [],
+          "source": "benzinga",
+          "url": "https://www.benzinga.com/crypto/cryptocurrency/26/04/52117530/sam-bankman-frieds-plea-for-new-trial-shut-down-judge-says-allegations-of-government-threats-wildly-conspiratorial",
+          "created_at": "2026-04-29T03:26:42+00:00",
+          "updated_at": "2026-04-29T03:26:42+00:00"
+        }
+      ]
+    },
+    "alpaca-news://article/notanint": {
+      "ok": true,
+      "contents": [
+        {
+          "error": "invalid_id",
+          "article_id": "notanint"
+        }
+      ]
+    },
+    "alpaca-news://article/-1": {
+      "ok": true,
+      "contents": [
+        {
+          "error": "not_found",
+          "article_id": -1
+        }
+      ]
+    }
+  },
+  "server_info": {
+    "name": "alpaca-news-mcp",
+    "version": "1.27.0"
+  },
+  "tools_list": [
+    "ack_news_alert",
+    "get_breaking_news_digest",
+    "get_interest_symbols",
+    "get_news_alerts",
+    "get_news_article",
+    "get_news_for_symbols",
+    "get_news_ingestion_stats",
+    "get_news_latency_stats",
+    "get_news_stream_health",
+    "get_news_subscription_state",
+    "get_news_symbol_map",
+    "get_news_versions",
+    "get_raw_news_events",
+    "get_recent_news",
+    "run_news_rest_backfill",
+    "search_news",
+    "set_interest_symbols"
+  ],
+  "resources_list": [
+    "alpaca-news://alerts",
+    "alpaca-news://health",
+    "alpaca-news://recent",
+    "alpaca-news://stats/ingestion",
+    "alpaca-news://stats/latency",
+    "alpaca-news://subscription",
+    "alpaca-news://symbols"
+  ],
+  "resource_templates_list": [
+    "alpaca-news://article/{article_id}",
+    "alpaca-news://symbols/{symbol}"
+  ],
+  "finished": "2026-04-29T04:10:27.226733+00:00"
+}
