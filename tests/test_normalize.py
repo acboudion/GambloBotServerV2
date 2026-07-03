@@ -72,7 +72,7 @@ def test_latency_ms_computed():
     assert a.latency_ms > 0
 
 
-def test_unknown_fields_preserved_as_raw_and_extras():
+def test_unknown_fields_preserved_in_raw_json():
     payload = {
         "T": "n",
         "id": 4,
@@ -81,13 +81,12 @@ def test_unknown_fields_preserved_as_raw_and_extras():
         "another_one": "yes",
     }
     a = normalize_news_message(payload)
-    assert "future_field" in a.extra_fields
-    assert a.extra_fields["another_one"] == "yes"
     # raw_json preserves the entire original payload
     import orjson
 
     raw = orjson.loads(a.raw_json)
     assert raw["future_field"] == {"x": 1}
+    assert raw["another_one"] == "yes"
 
 
 def test_invalid_message_type_rejected():

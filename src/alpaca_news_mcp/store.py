@@ -6,7 +6,8 @@ import asyncio
 import json
 import statistics
 import uuid
-from collections.abc import Iterable
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -16,6 +17,7 @@ from typing import Any
 import aiosqlite
 
 from .logging_utils import get_logger
+from .migrations import NEWS_MIGRATIONS, migrate
 from .models import Alert, IngestionStats, LatencyStats, NewsArticle, NewsArticleVersion
 from .normalize import NormalizedArticle
 
@@ -30,6 +32,29 @@ class UpsertResult:
     article: NewsArticle
 
 
+class BatchWriter:
+    """Write facade yielded by Store.batch_writer().
+
+    Methods mirror the Store API but assume the write lock is already held and
+    never commit — the surrounding batch_writer() context commits once on exit.
+    """
+
+    def __init__(self, store: Store) -> None:
+        self._store = store
+
+    async def upsert_article(
+        self, normalized: NormalizedArticle, *, source_kind: str
+    ) -> UpsertResult:
+        return await self._store._upsert_article_locked(normalized, source_kind=source_kind)
+
+    async def record_alert(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        return await self._store._record_alert_locked(
+            alert, raw_json=raw_json, content_hash=content_hash
+        )
+
+
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -39,6 +64,7 @@ class Store:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        self._next_seq: int = 1
 
     @classmethod
     async def open(cls, path: str) -> Store:
@@ -70,6 +96,17 @@ class Store:
         async with self._write_lock:
             await self.conn.executescript(sql_text)
             await self.conn.commit()
+            await migrate(self.conn, NEWS_MIGRATIONS)
+            cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM news_articles")
+            row = await cur.fetchone()
+            await cur.close()
+            self._next_seq = (int(row[0]) if row else 0) + 1
+
+    def _allocate_seq(self) -> int:
+        """Next monotonic ingest sequence. Callers must hold the write lock."""
+        seq = self._next_seq
+        self._next_seq += 1
+        return seq
 
     async def upsert_article(
         self,
@@ -77,151 +114,293 @@ class Store:
         *,
         source_kind: str,
     ) -> UpsertResult:
-        """Insert or update an article. Returns whether new and whether a version was added."""
+        """Insert or update an article with its own transaction."""
         async with self._write_lock:
-            cur = await self.conn.execute(
-                """SELECT id, headline, summary, content_html, updated_at, update_count, symbols_json
-                   FROM news_articles WHERE id = ?""",
-                (normalized.id,),
-            )
-            existing = await cur.fetchone()
-            await cur.close()
+            result = await self._upsert_article_locked(normalized, source_kind=source_kind)
+            await self.conn.commit()
+        return result
 
-            now = _utcnow_iso()
-            symbols_json = json.dumps(normalized.symbols)
-            was_new = existing is None
-            version_inserted = False
+    @asynccontextmanager
+    async def batch_writer(self) -> AsyncIterator[BatchWriter]:
+        """Hold the write lock across several writes and commit once.
 
-            if existing is None:
-                await self.conn.execute(
-                    """
-                    INSERT INTO news_articles (
-                        id, headline, summary, author, created_at, updated_at,
-                        content_html, content_text, url, source,
-                        symbols_json, raw_json,
-                        first_seen_at, last_seen_at, last_seen_source,
-                        update_count, latency_ms, is_content_present
-                    ) VALUES (
-                        ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?,
-                        ?, ?,
-                        ?, ?, ?,
-                        0, ?, ?
-                    )
-                    """,
-                    (
-                        normalized.id,
-                        normalized.headline,
-                        normalized.summary,
-                        normalized.author,
-                        normalized.created_at,
-                        normalized.updated_at,
-                        normalized.content_html,
-                        normalized.content_text,
-                        normalized.url,
-                        normalized.source,
-                        symbols_json,
-                        normalized.raw_json,
-                        now,
-                        now,
-                        source_kind,
-                        normalized.latency_ms,
-                        1 if normalized.is_content_present else 0,
-                    ),
+        This is the hot-path primitive: the stream persister drains a queue
+        batch, writes every article + alert through the yielded BatchWriter,
+        and pays a single fsync instead of one per row.
+        """
+        async with self._write_lock:
+            # The commit itself must be inside the rollback guard: a commit
+            # failure (SQLITE_BUSY, I/O error) would otherwise leave the
+            # transaction open, and a later unrelated write would commit this
+            # "failed" batch's rows after the persister already discarded its
+            # pending alert quota/state.
+            try:
+                yield BatchWriter(self)
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
+
+    async def _upsert_article_locked(
+        self,
+        normalized: NormalizedArticle,
+        *,
+        source_kind: str,
+    ) -> UpsertResult:
+        """Insert or update an article. Caller must hold the write lock; does not commit.
+
+        The returned NewsArticle is assembled in Python (mirroring the SQL
+        COALESCE semantics) so the hot path avoids a redundant re-SELECT.
+        """
+        cur = await self.conn.execute(
+            "SELECT * FROM news_articles WHERE id = ?",
+            (normalized.id,),
+        )
+        existing = await cur.fetchone()
+        await cur.close()
+
+        now = _utcnow_iso()
+        symbols_json = json.dumps(normalized.symbols)
+        was_new = existing is None
+        version_inserted = False
+
+        try:
+            raw = json.loads(normalized.raw_json) if normalized.raw_json else None
+        except json.JSONDecodeError:
+            raw = None
+
+        if existing is None:
+            new_seq = self._allocate_seq()
+            await self.conn.execute(
+                """
+                INSERT INTO news_articles (
+                    id, headline, summary, author, created_at, updated_at,
+                    content_html, content_text, url, source,
+                    symbols_json, raw_json,
+                    first_seen_at, last_seen_at, last_seen_source,
+                    update_count, latency_ms, is_content_present, seq
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?,
+                    0, ?, ?, ?
                 )
+                """,
+                (
+                    normalized.id,
+                    normalized.headline,
+                    normalized.summary,
+                    normalized.author,
+                    normalized.created_at,
+                    normalized.updated_at,
+                    normalized.content_html,
+                    normalized.content_text,
+                    normalized.url,
+                    normalized.source,
+                    symbols_json,
+                    normalized.raw_json,
+                    now,
+                    now,
+                    source_kind,
+                    normalized.latency_ms,
+                    1 if normalized.is_content_present else 0,
+                    new_seq,
+                ),
+            )
+            version_inserted = await self._insert_version(
+                normalized, source_kind=source_kind
+            )
+            await self._upsert_symbol_index(normalized, source_kind=source_kind)
+            await self._fts_insert(
+                normalized.id,
+                normalized.headline,
+                normalized.summary,
+                normalized.content_text,
+            )
+            article = NewsArticle(
+                id=normalized.id,
+                headline=normalized.headline,
+                summary=normalized.summary,
+                author=normalized.author,
+                created_at=normalized.created_at,
+                updated_at=normalized.updated_at,
+                content_html=normalized.content_html,
+                content_text=normalized.content_text,
+                url=normalized.url,
+                source=normalized.source,
+                symbols=list(normalized.symbols),
+                first_seen_at=now,
+                last_seen_at=now,
+                last_seen_source=source_kind,
+                update_count=0,
+                latency_ms=normalized.latency_ms,
+                is_content_present=normalized.is_content_present,
+                seq=new_seq,
+                raw=raw,
+            )
+        else:
+            # Compare against post-COALESCE values: when the incoming payload
+            # omits an optional field (None), the UPDATE keeps the existing
+            # value, so it should not count as a content change.
+            content_changed = (existing["headline"] or "") != (normalized.headline or "")
+            if normalized.summary is not None and (existing["summary"] or "") != normalized.summary:
+                content_changed = True
+            if (
+                normalized.content_html is not None
+                and (existing["content_html"] or "") != normalized.content_html
+            ):
+                content_changed = True
+            if (
+                normalized.updated_at is not None
+                and (existing["updated_at"] or "") != normalized.updated_at
+            ):
+                content_changed = True
+            existing_symbols = set(json.loads(existing["symbols_json"] or "[]"))
+            new_symbols = set(normalized.symbols)
+            symbols_changed = existing_symbols != new_symbols
+            changed = content_changed or symbols_changed
+            # update last_seen + counters
+            new_update_count = (existing["update_count"] or 0) + (1 if changed else 0)
+            # A changed article gets a fresh seq so delta-cursor pollers
+            # (get_news_since) see the update; unchanged re-deliveries keep
+            # their position and stay invisible to cursors.
+            new_seq = self._allocate_seq() if changed else existing["seq"]
+            await self.conn.execute(
+                """
+                UPDATE news_articles SET
+                    headline = ?,
+                    summary = COALESCE(?, summary),
+                    author = COALESCE(?, author),
+                    created_at = COALESCE(?, created_at),
+                    updated_at = COALESCE(?, updated_at),
+                    content_html = COALESCE(?, content_html),
+                    content_text = COALESCE(?, content_text),
+                    url = COALESCE(?, url),
+                    source = COALESCE(?, source),
+                    symbols_json = ?,
+                    raw_json = ?,
+                    last_seen_at = ?,
+                    last_seen_source = ?,
+                    update_count = ?,
+                    latency_ms = COALESCE(latency_ms, ?),
+                    is_content_present = MAX(is_content_present, ?),
+                    seq = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized.headline,
+                    normalized.summary,
+                    normalized.author,
+                    normalized.created_at,
+                    normalized.updated_at,
+                    normalized.content_html,
+                    normalized.content_text,
+                    normalized.url,
+                    normalized.source,
+                    symbols_json,
+                    normalized.raw_json,
+                    now,
+                    source_kind,
+                    new_update_count,
+                    normalized.latency_ms,
+                    1 if normalized.is_content_present else 0,
+                    new_seq,
+                    normalized.id,
+                ),
+            )
+            if content_changed:
                 version_inserted = await self._insert_version(
                     normalized, source_kind=source_kind
                 )
-                await self._upsert_symbol_index(normalized, source_kind=source_kind)
-            else:
-                # Compare against post-COALESCE values: when the incoming payload
-                # omits an optional field (None), the UPDATE keeps the existing
-                # value, so it should not count as a content change.
-                content_changed = (existing["headline"] or "") != (normalized.headline or "")
-                if normalized.summary is not None and (existing["summary"] or "") != normalized.summary:
-                    content_changed = True
-                if (
-                    normalized.content_html is not None
-                    and (existing["content_html"] or "") != normalized.content_html
-                ):
-                    content_changed = True
-                if (
-                    normalized.updated_at is not None
-                    and (existing["updated_at"] or "") != normalized.updated_at
-                ):
-                    content_changed = True
-                existing_symbols = set(json.loads(existing["symbols_json"] or "[]"))
-                new_symbols = set(normalized.symbols)
-                symbols_changed = existing_symbols != new_symbols
-                changed = content_changed or symbols_changed
-                # update last_seen + counters
-                new_update_count = (existing["update_count"] or 0) + (1 if changed else 0)
-                await self.conn.execute(
-                    """
-                    UPDATE news_articles SET
-                        headline = ?,
-                        summary = COALESCE(?, summary),
-                        author = COALESCE(?, author),
-                        created_at = COALESCE(?, created_at),
-                        updated_at = COALESCE(?, updated_at),
-                        content_html = COALESCE(?, content_html),
-                        content_text = COALESCE(?, content_text),
-                        url = COALESCE(?, url),
-                        source = COALESCE(?, source),
-                        symbols_json = ?,
-                        raw_json = ?,
-                        last_seen_at = ?,
-                        last_seen_source = ?,
-                        update_count = ?,
-                        latency_ms = COALESCE(latency_ms, ?),
-                        is_content_present = MAX(is_content_present, ?)
-                    WHERE id = ?
-                    """,
-                    (
-                        normalized.headline,
-                        normalized.summary,
-                        normalized.author,
-                        normalized.created_at,
-                        normalized.updated_at,
-                        normalized.content_html,
-                        normalized.content_text,
-                        normalized.url,
-                        normalized.source,
-                        symbols_json,
-                        normalized.raw_json,
-                        now,
-                        source_kind,
-                        new_update_count,
-                        normalized.latency_ms,
-                        1 if normalized.is_content_present else 0,
-                        normalized.id,
-                    ),
-                )
-                if content_changed:
-                    version_inserted = await self._insert_version(
-                        normalized, source_kind=source_kind
+            if symbols_changed:
+                removed_symbols = existing_symbols - new_symbols
+                if removed_symbols:
+                    placeholders = ",".join("?" * len(removed_symbols))
+                    await self.conn.execute(
+                        f"DELETE FROM news_symbol_index "
+                        f"WHERE article_id = ? AND symbol IN ({placeholders})",
+                        (normalized.id, *sorted(removed_symbols)),
                     )
-                if symbols_changed:
-                    removed_symbols = existing_symbols - new_symbols
-                    if removed_symbols:
-                        placeholders = ",".join("?" * len(removed_symbols))
-                        await self.conn.execute(
-                            f"DELETE FROM news_symbol_index "
-                            f"WHERE article_id = ? AND symbol IN ({placeholders})",
-                            (normalized.id, *sorted(removed_symbols)),
-                        )
-                if changed:
-                    await self._upsert_symbol_index(normalized, source_kind=source_kind)
+            if changed:
+                await self._upsert_symbol_index(normalized, source_kind=source_kind)
+            # Keep the FTS index in step with the stored (post-COALESCE) text.
+            merged_summary = (
+                normalized.summary if normalized.summary is not None else existing["summary"]
+            )
+            merged_content_text = (
+                normalized.content_text
+                if normalized.content_text is not None
+                else existing["content_text"]
+            )
+            fts_changed = (
+                normalized.headline != existing["headline"]
+                or merged_summary != existing["summary"]
+                or merged_content_text != existing["content_text"]
+            )
+            if fts_changed:
+                await self._fts_delete(
+                    normalized.id,
+                    existing["headline"],
+                    existing["summary"],
+                    existing["content_text"],
+                )
+                await self._fts_insert(
+                    normalized.id,
+                    normalized.headline,
+                    merged_summary,
+                    merged_content_text,
+                )
+            # Mirror the UPDATE's COALESCE semantics in Python so the caller
+            # gets the post-write row without a re-SELECT.
+            article = NewsArticle(
+                id=normalized.id,
+                headline=normalized.headline,
+                summary=normalized.summary if normalized.summary is not None else existing["summary"],
+                author=normalized.author if normalized.author is not None else existing["author"],
+                created_at=normalized.created_at if normalized.created_at is not None else existing["created_at"],
+                updated_at=normalized.updated_at if normalized.updated_at is not None else existing["updated_at"],
+                content_html=normalized.content_html if normalized.content_html is not None else existing["content_html"],
+                content_text=normalized.content_text if normalized.content_text is not None else existing["content_text"],
+                url=normalized.url if normalized.url is not None else existing["url"],
+                source=normalized.source if normalized.source is not None else existing["source"],
+                symbols=list(normalized.symbols),
+                first_seen_at=existing["first_seen_at"],
+                last_seen_at=now,
+                last_seen_source=source_kind,
+                update_count=new_update_count,
+                latency_ms=existing["latency_ms"] if existing["latency_ms"] is not None else normalized.latency_ms,
+                is_content_present=bool(existing["is_content_present"]) or normalized.is_content_present,
+                seq=new_seq,
+                raw=raw,
+            )
 
-            await self.conn.commit()
-
-        article = await self.get_article(normalized.id)
-        assert article is not None
         return UpsertResult(
             article_id=normalized.id,
             was_new=was_new,
             version_inserted=version_inserted,
             article=article,
+        )
+
+    async def _fts_insert(
+        self, article_id: int, headline: str | None, summary: str | None,
+        content_text: str | None,
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO news_fts(rowid, headline, summary, content_text) "
+            "VALUES (?, ?, ?, ?)",
+            (article_id, headline, summary, content_text),
+        )
+
+    async def _fts_delete(
+        self, article_id: int, headline: str | None, summary: str | None,
+        content_text: str | None,
+    ) -> None:
+        # External-content FTS5 'delete' requires the OLD column values.
+        await self.conn.execute(
+            "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
+            "VALUES ('delete', ?, ?, ?, ?)",
+            (article_id, headline, summary, content_text),
         )
 
     async def _insert_version(
@@ -284,33 +463,93 @@ class Store:
             )
             await self.conn.commit()
 
-    async def record_alert(self, alert: Alert, *, raw_json: str) -> bool:
-        """Insert an alert. Returns True if inserted, False if (article_id, category) already exists."""
-        async with self._write_lock:
+    async def unreplayed_dropped_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Queue-overflow-dropped articles not yet replayed, oldest first.
+        Each entry: {event_id, payload} where payload is the parsed article
+        dict (None if the stored JSON is unparseable)."""
+        cur = await self.conn.execute(
+            "SELECT event_id, raw_json FROM raw_events "
+            "WHERE message_type = 'queue_overflow_drop' AND replayed = 0 "
+            "ORDER BY received_at ASC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        out: list[dict[str, Any]] = []
+        for r in rows:
             try:
-                await self.conn.execute(
-                    """
-                    INSERT INTO alerts (
-                        alert_id, article_id, created_at, severity, category,
-                        symbols_json, headline, reason, acknowledged, raw_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-                    """,
-                    (
-                        alert.alert_id,
-                        alert.article_id,
-                        alert.created_at,
-                        alert.severity,
-                        alert.category,
-                        json.dumps(alert.symbols),
-                        alert.headline,
-                        alert.reason,
-                        raw_json,
-                    ),
-                )
-                await self.conn.commit()
-                return True
-            except aiosqlite.IntegrityError:
+                payload = json.loads(r["raw_json"])
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            out.append({"event_id": r["event_id"], "payload": payload})
+        return out
+
+    async def mark_events_replayed(self, event_ids: list[str]) -> None:
+        if not event_ids:
+            return
+        placeholders = ",".join("?" * len(event_ids))
+        async with self._write_lock:
+            await self.conn.execute(
+                f"UPDATE raw_events SET replayed = 1 WHERE event_id IN ({placeholders})",
+                event_ids,
+            )
+            await self.conn.commit()
+
+    async def record_alert(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        """Insert an alert. Returns True if inserted, False if deduplicated."""
+        async with self._write_lock:
+            inserted = await self._record_alert_locked(
+                alert, raw_json=raw_json, content_hash=content_hash
+            )
+            await self.conn.commit()
+            return inserted
+
+    async def _record_alert_locked(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        # Cross-source dedup: the same story republished under a different
+        # article id (news is single-sourced today, but re-syndication and
+        # updates produce identical bodies) must not alert twice per category.
+        if content_hash:
+            window_start = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+            cur = await self.conn.execute(
+                "SELECT 1 FROM alerts WHERE category = ? AND content_hash = ? "
+                "AND created_at >= ? AND (article_id IS NULL OR article_id != ?) "
+                "LIMIT 1",
+                (alert.category, content_hash, window_start, alert.article_id),
+            )
+            duplicate = await cur.fetchone()
+            await cur.close()
+            if duplicate is not None:
                 return False
+        try:
+            await self.conn.execute(
+                """
+                INSERT INTO alerts (
+                    alert_id, article_id, created_at, severity, category,
+                    symbols_json, headline, reason, acknowledged, raw_json,
+                    content_hash, direction
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                """,
+                (
+                    alert.alert_id,
+                    alert.article_id,
+                    alert.created_at,
+                    alert.severity,
+                    alert.category,
+                    json.dumps(alert.symbols),
+                    alert.headline,
+                    alert.reason,
+                    raw_json,
+                    content_hash,
+                    alert.direction,
+                ),
+            )
+            return True
+        except aiosqlite.IntegrityError:
+            return False
 
     async def ack_alert(self, alert_id: str) -> bool:
         async with self._write_lock:
@@ -399,6 +638,74 @@ class Store:
         until: str | None = None,
         limit: int = 50,
     ) -> list[NewsArticle]:
+        """Ranked FTS5 search, falling back to substring LIKE when FTS finds
+        nothing (token-based FTS can't match mid-word fragments) or errors."""
+        try:
+            articles = await self._search_articles_fts(
+                query=query, symbols=symbols, since=since, until=until, limit=limit
+            )
+        except aiosqlite.OperationalError as e:
+            log.warning("FTS search failed (%s); falling back to LIKE", e)
+            articles = []
+        if articles:
+            return articles
+        return await self._search_articles_like(
+            query=query, symbols=symbols, since=since, until=until, limit=limit
+        )
+
+    @staticmethod
+    def _fts_match_expression(query: str) -> str:
+        # Quote every token (doubling embedded quotes) so LLM-supplied text can
+        # never be parsed as FTS5 syntax; tokens are implicitly ANDed.
+        tokens = [t for t in query.split() if t]
+        return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+
+    async def _search_articles_fts(
+        self,
+        *,
+        query: str,
+        symbols: list[str] | None,
+        since: str | None,
+        until: str | None,
+        limit: int,
+    ) -> list[NewsArticle]:
+        match = self._fts_match_expression(query)
+        if not match:
+            return []
+        clauses = ["news_fts MATCH ?"]
+        params: list[Any] = [match]
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            clauses.append(
+                f"a.id IN (SELECT article_id FROM news_symbol_index WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        if since:
+            clauses.append("COALESCE(a.updated_at, a.created_at, a.first_seen_at) >= ?")
+            params.append(since)
+        if until:
+            clauses.append("COALESCE(a.updated_at, a.created_at, a.first_seen_at) <= ?")
+            params.append(until)
+        sql = (
+            "SELECT a.* FROM news_fts f JOIN news_articles a ON a.id = f.rowid WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY f.rank LIMIT ?"
+        )
+        params.append(limit)
+        cur = await self.conn.execute(sql, params)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_article(r) for r in rows]
+
+    async def _search_articles_like(
+        self,
+        *,
+        query: str,
+        symbols: list[str] | None,
+        since: str | None,
+        until: str | None,
+        limit: int,
+    ) -> list[NewsArticle]:
         like = f"%{query.lower()}%"
         clauses = ["(LOWER(headline) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content_text) LIKE ?)"]
         params: list[Any] = [like, like, like]
@@ -429,6 +736,99 @@ class Store:
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
+
+    async def articles_since(
+        self,
+        *,
+        cursor: int,
+        limit: int,
+        symbols: list[str] | None = None,
+    ) -> tuple[list[NewsArticle], int, bool]:
+        """Articles with seq > cursor in ingest order.
+
+        Returns (articles, next_cursor, has_more). next_cursor equals the input
+        cursor when nothing new arrived, so pollers can pass it back verbatim.
+        """
+        clauses = ["seq > ?"]
+        params: list[Any] = [cursor]
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            clauses.append(
+                f"id IN (SELECT article_id FROM news_symbol_index WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        sql = (
+            "SELECT * FROM news_articles WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY seq ASC LIMIT ?"
+        )
+        params.append(limit + 1)
+        cur = await self.conn.execute(sql, params)
+        rows = list(await cur.fetchall())
+        await cur.close()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        articles = [self._row_to_article(r) for r in rows]
+        # With a symbol filter, articles outside the filter still advance seq;
+        # skipping ahead to MAX(seq) would lose them if the filter changes, so
+        # the cursor only ever advances over rows actually returned.
+        next_cursor = articles[-1].seq if articles and articles[-1].seq else cursor
+        return articles, next_cursor, has_more
+
+    async def alerts_since(
+        self,
+        *,
+        cursor: int,
+        limit: int,
+        severity: str | None = None,
+        categories: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Alerts with rowid > cursor in insert order (alerts are insert-only).
+
+        Returns (alert_dicts_with_cursor, next_cursor, has_more).
+        """
+        clauses = ["rowid > ?"]
+        params: list[Any] = [cursor]
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity)
+        if categories:
+            placeholders = ",".join("?" * len(categories))
+            clauses.append(f"category IN ({placeholders})")
+            params.extend(categories)
+        sql = (
+            "SELECT rowid AS cursor_id, * FROM alerts WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY rowid ASC LIMIT ?"
+        )
+        params.append(limit + 1)
+        cur = await self.conn.execute(sql, params)
+        rows = list(await cur.fetchall())
+        await cur.close()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "cursor": int(r["cursor_id"]),
+                    "alert_id": r["alert_id"],
+                    "article_id": r["article_id"],
+                    "created_at": r["created_at"],
+                    "severity": r["severity"],
+                    "category": r["category"],
+                    "symbols": json.loads(r["symbols_json"] or "[]"),
+                    "headline": r["headline"],
+                    "reason": r["reason"],
+                    "acknowledged": bool(r["acknowledged"]),
+                    "direction": (r["direction"] if "direction" in r.keys() else None)
+                    or "neutral",
+                }
+            )
+        # Filtered-out rows still advance rowid; same conservative-cursor rule
+        # as articles_since.
+        next_cursor = out[-1]["cursor"] if out else cursor
+        return out, next_cursor, has_more
 
     async def articles_for_symbols(
         self,
@@ -548,6 +948,7 @@ class Store:
                 headline=r["headline"],
                 reason=r["reason"],
                 acknowledged=bool(r["acknowledged"]),
+                direction=(r["direction"] if "direction" in r.keys() else None) or "neutral",
             )
             for r in rows
         ]
@@ -677,34 +1078,57 @@ class Store:
         cutoff_articles = (now - timedelta(days=event_days)).isoformat()
         cutoff_raw = (now - timedelta(days=raw_event_days)).isoformat()
         async with self._write_lock:
-            cur = await self.conn.execute(
-                "DELETE FROM news_article_versions "
-                "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
-                (cutoff_articles,),
-            )
-            v = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM news_symbol_index "
-                "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
-                (cutoff_articles,),
-            )
-            s = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM news_articles WHERE first_seen_at < ?",
-                (cutoff_articles,),
-            )
-            a = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM raw_events WHERE received_at < ?",
-                (cutoff_raw,),
-            )
-            r = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM alerts WHERE created_at < ?",
-                (cutoff_articles,),
-            )
-            al = cur.rowcount or 0
-            await self.conn.commit()
+            # Everything below must land (or vanish) together: the FTS purge
+            # runs first because external-content FTS5 needs the old column
+            # values, so a mid-sequence failure without rollback would leave
+            # FTS rows deleted for articles that still exist.
+            try:
+                await self.conn.execute(
+                    "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
+                    "SELECT 'delete', id, headline, summary, content_text "
+                    "FROM news_articles WHERE first_seen_at < ?",
+                    (cutoff_articles,),
+                )
+                cur = await self.conn.execute(
+                    "DELETE FROM news_article_versions "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                v = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM news_symbol_index "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                s = cur.rowcount or 0
+                # Alerts referencing expiring articles must go BEFORE the
+                # articles themselves — a recent alert on an old article would
+                # otherwise trip the alerts.article_id foreign key.
+                cur = await self.conn.execute(
+                    "DELETE FROM alerts "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                al = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM news_articles WHERE first_seen_at < ?",
+                    (cutoff_articles,),
+                )
+                a = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM raw_events WHERE received_at < ?",
+                    (cutoff_raw,),
+                )
+                r = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM alerts WHERE created_at < ?",
+                    (cutoff_articles,),
+                )
+                al += cur.rowcount or 0
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
         return {
             "articles": a,
             "versions": v,
@@ -738,16 +1162,6 @@ class Store:
             update_count=row["update_count"] or 0,
             latency_ms=row["latency_ms"],
             is_content_present=bool(row["is_content_present"]),
+            seq=row["seq"] if "seq" in row.keys() else None,
             raw=raw,
         )
-
-
-def chunked(iterable: Iterable[Any], n: int) -> Iterable[list[Any]]:
-    buf: list[Any] = []
-    for item in iterable:
-        buf.append(item)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf

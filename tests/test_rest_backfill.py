@@ -22,7 +22,7 @@ async def wired(tmp_path, monkeypatch):
     cfg = Config.from_env()
     store = await Store.open(cfg.storage_path)
     await store.init_schema()
-    state = State(max_recent_articles=cfg.max_recent_articles_memory)
+    state = State()
     alerts = AlertEngine()
     worker = RestBackfillWorker(cfg, store, state, alerts)
     yield worker, store, state, cfg
@@ -128,8 +128,8 @@ async def test_403_marks_entitlement_error(wired):
         result = await worker.backfill_startup()
 
     assert result["ingested"] == 0
-    assert state.stream_health.entitlement_error is True
-    assert "rest 403 forbidden" in (state.stream_health.last_error or "")
+    assert state.snapshot_health().entitlement_error is True
+    assert "rest 403 forbidden" in (state.snapshot_health().last_error or "")
 
 
 @pytest.mark.asyncio
@@ -153,8 +153,8 @@ async def test_429_retry_budget_aborts_to_avoid_infinite_loop(wired, monkeypatch
     # Bounded retry budget: must not be unbounded.
     assert route.call_count <= 10
     assert route.call_count >= 2
-    assert state.stream_health.last_error is not None
-    assert "429" in (state.stream_health.last_error or "")
+    assert state.snapshot_health().last_error is not None
+    assert "429" in (state.snapshot_health().last_error or "")
 
 
 @pytest.mark.asyncio
@@ -233,7 +233,7 @@ async def test_backfill_distinguishes_new_updated_duplicate(wired):
         route.mock(return_value=httpx.Response(200, json=page_v2))
         third = await worker.manual(60)
 
-    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1}
+    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "failure": None}
     assert second["ingested"] == 1 and second["updated"] == 1 and second["new"] == 0 and second["duplicate"] == 0
     assert third["ingested"] == 1 and third["duplicate"] == 1 and third["new"] == 0 and third["updated"] == 0
 
@@ -276,3 +276,129 @@ async def test_rest_then_ws_versioning(wired):
     assert res.version_inserted is True
     versions = await store.get_versions(99)
     assert {v.headline for v in versions} == {"v1", "v2"}
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_on_failure_so_retry_path_engages(wired):
+    """Reconnect gap-fill must NOT swallow REST failures: partial counts on
+    403/429/HTTP errors would make BaseStreamWorker treat the fill as done and
+    silently drop the disconnect window."""
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        with pytest.raises(BackfillError, match="403"):
+            await worker.gap_fill()
+
+    # Startup keeps its best-effort contract (app_setup catches and continues).
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        result = await worker.backfill_startup()
+    assert result["ingested"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_another_backfill_holds_the_lock(wired):
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    await worker._run_lock.acquire()
+    try:
+        with pytest.raises(BackfillError, match="already running"):
+            await worker.gap_fill()
+    finally:
+        worker._run_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_page_cap_truncates(wired, monkeypatch):
+    """A busy window that still has next_page_token at the page cap is an
+    incomplete fill — must raise so the retry/alert path engages."""
+    import alpaca_news_mcp.rest_backfill as rb
+
+    monkeypatch.setattr(rb, "MAX_BACKFILL_PAGES", 1)
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    page = {
+        "news": [{"id": 900, "headline": "h", "created_at": "2026-04-28T19:01:00Z",
+                  "updated_at": "2026-04-28T19:01:00Z"}],
+        "next_page_token": "more",
+    }
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=page))
+        with pytest.raises(rb.BackfillError, match="page cap"):
+            await worker.gap_fill()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_items_fail_to_ingest(wired):
+    """Item-level ingest failures (bad payloads) leave the window incomplete —
+    reconnect gap-fills must raise, not report success over missing articles."""
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    page = {
+        "news": [
+            {"id": "not-an-int", "headline": "unparseable id"},
+            {"id": 901, "headline": "fine", "created_at": "2026-04-28T19:01:00Z",
+             "updated_at": "2026-04-28T19:01:00Z"},
+        ],
+        "next_page_token": None,
+    }
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=page))
+        with pytest.raises(BackfillError, match="failed to ingest"):
+            await worker.gap_fill()
+    # The good article still landed (retry is idempotent on the rest).
+    assert (await _store.get_article(901)) is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_backfill_surfaces_failure(wired):
+    """Non-raising runs must still report incompleteness — the manual MCP tool
+    turns this into status=incomplete instead of a false ok."""
+    worker, _store, _state, _ = wired
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        result = await worker.manual(30)
+    assert result["failure"] is not None
+    assert "403" in result["failure"]
+
+    success_page = {"news": [], "next_page_token": None}
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=success_page))
+        result = await worker.manual(30)
+    assert result["failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_manual_skipped_by_concurrent_run_reports_failure(wired):
+    """A manual run skipped because another backfill holds the lock fetched
+    nothing for the requested window — it must carry a failure so the MCP
+    tool reports status=incomplete instead of a false ok."""
+    worker, _store, _state, _ = wired
+    await worker._run_lock.acquire()
+    try:
+        result = await worker.manual(30)
+    finally:
+        worker._run_lock.release()
+    assert result["skipped"] == 1
+    assert result["ingested"] == 0
+    assert result["failure"] is not None
+    assert "already running" in result["failure"]
+
+
+@pytest.mark.asyncio
+async def test_non_json_body_marks_run_incomplete(wired):
+    """A 200 with a non-JSON body must mark the run incomplete, not raise."""
+    worker, _store, _state, _ = wired
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(
+            return_value=httpx.Response(200, text="<html>oops</html>")
+        )
+        result = await worker.manual(30)
+    assert result["failure"] == "non-JSON response body"

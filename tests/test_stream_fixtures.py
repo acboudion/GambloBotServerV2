@@ -37,7 +37,7 @@ async def wired(tmp_path, monkeypatch):
     cfg = Config.from_env()
     store = await Store.open(cfg.storage_path)
     await store.init_schema()
-    state = State(max_recent_articles=cfg.max_recent_articles_memory)
+    state = State()
     alerts = AlertEngine()
     yield cfg, store, state, alerts
     await store.close()
@@ -95,8 +95,8 @@ async def test_full_happy_path_with_article(wired):
                 break
             await asyncio.sleep(0.1)
         assert a is not None
-        assert state.stream_health.connected is True
-        assert state.stream_health.authenticated is True
+        assert state.snapshot_health().connected is True
+        assert state.snapshot_health().authenticated is True
         assert state.subscription_state.acknowledged == {"news": ["*"]}
     finally:
         await worker.stop()
@@ -135,7 +135,7 @@ async def test_handshake_updates_last_message_at(wired):
                 break
             await asyncio.sleep(0.05)
         assert state.subscription_state.acknowledged == {"news": ["*"]}
-        assert state.stream_health.last_message_at is not None
+        assert state.snapshot_health().last_message_at is not None
     finally:
         await worker.stop()
         server.close()
@@ -165,7 +165,7 @@ async def test_406_triggers_backoff_path(wired):
         # Wait until 406 is observed
         for _ in range(50):
             await asyncio.sleep(0.1)
-            if state.stream_health.connection_limit_blocked or state.stream_health.last_error:
+            if state.snapshot_health().connection_limit_blocked or state.snapshot_health().last_error:
                 break
         # We expect at least one "stream_error" alert recorded for 406
         alerts_db = await store.get_alerts(minutes=60, severity="critical")
@@ -196,9 +196,9 @@ async def test_409_marks_entitlement_error(wired):
         await worker.start()
         for _ in range(50):
             await asyncio.sleep(0.1)
-            if state.stream_health.entitlement_error:
+            if state.snapshot_health().entitlement_error:
                 break
-        assert state.stream_health.entitlement_error is True
+        assert state.snapshot_health().entitlement_error is True
     finally:
         await worker.stop()
         server.close()
@@ -290,8 +290,8 @@ async def test_subscription_fallback_preserves_mode_after_ack(wired):
         assert state.subscription_state.mode == "fallback"
         assert state.subscription_state.requested == {"news": ["AAPL", "MSFT"]}
         assert state.subscription_state.acknowledged == {"news": ["AAPL", "MSFT"]}
-        assert state.stream_health.subscription_mode == "fallback"
-        assert state.stream_health.requested_subscription == {"news": ["AAPL", "MSFT"]}
+        assert state.snapshot_health().subscription_mode == "fallback"
+        assert state.snapshot_health().requested_subscription == {"news": ["AAPL", "MSFT"]}
     finally:
         await worker.stop()
         server.close()
@@ -325,10 +325,10 @@ async def test_auth_failure_clears_connected_state(wired):
         await worker.start()
         for _ in range(50):
             await asyncio.sleep(0.1)
-            if state.stream_health.authenticated is False and state.stream_health.connected is False:
+            if state.snapshot_health().authenticated is False and state.snapshot_health().connected is False:
                 break
-        assert state.stream_health.authenticated is False
-        assert state.stream_health.connected is False
+        assert state.snapshot_health().authenticated is False
+        assert state.snapshot_health().connected is False
     finally:
         await worker.stop()
         server.close()
@@ -372,10 +372,10 @@ async def test_disconnect_clears_authenticated_flag(wired):
         # and verify both flags are cleared (not just `connected`).
         for _ in range(50):
             await asyncio.sleep(0.1)
-            if state.stream_health.connected is False:
+            if state.snapshot_health().connected is False:
                 break
-        assert state.stream_health.connected is False
-        assert state.stream_health.authenticated is False
+        assert state.snapshot_health().connected is False
+        assert state.snapshot_health().authenticated is False
     finally:
         await worker.stop()
         server.close()
@@ -454,7 +454,7 @@ async def test_queue_overflow_records_drop_instead_of_silent_eviction(wired):
 
         await worker._enqueue_article({"id": 2, "headline": "second"})
 
-        assert state.stream_health.articles_dropped == 1
+        assert state.snapshot_health().articles_dropped == 1
         events = await store.recent_raw_events(minutes=60, limit=20)
         overflow_events = [e for e in events if e["message_type"] == "queue_overflow_drop"]
         assert overflow_events, "dropped article must be persisted as a raw event"
@@ -508,7 +508,7 @@ async def test_non_entitlement_error_does_not_trigger_wildcard_fallback(wired):
         assert received_subs == [{"action": "subscribe", "news": ["*"]}]
         assert state.subscription_state.mode == "wildcard"
         assert state.subscription_state.requested == {"news": ["*"]}
-        assert state.stream_health.subscription_mode == "wildcard"
+        assert state.snapshot_health().subscription_mode == "wildcard"
     finally:
         await worker.stop()
         server.close()
@@ -552,7 +552,7 @@ async def test_entitlement_flag_cleared_after_successful_subscription(wired):
                 break
             await asyncio.sleep(0.1)
         assert state.subscription_state.acknowledged == {"news": ["AAPL", "MSFT"]}
-        assert state.stream_health.entitlement_error is False
+        assert state.snapshot_health().entitlement_error is False
     finally:
         await worker.stop()
         server.close()
@@ -598,3 +598,40 @@ async def test_malformed_message_is_recorded_and_loop_survives(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_rolled_back_batch_does_not_advance_watermark(wired, monkeypatch):
+    """A failed batch write must not advance in-memory article state: the
+    gap-fill watermark (last_seen_updated_at) would otherwise end up past
+    articles that never reached SQLite, permanently skipping them on the
+    next reconnect gap-fill."""
+    cfg, store, state, alerts = wired
+    NewsStreamWorker.reset_singleton()
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+
+    def payload(i: int, updated: str) -> dict:
+        return {
+            "T": "n", "id": i, "headline": f"a{i}", "summary": "s",
+            "created_at": "2026-04-28T19:00:00Z", "updated_at": updated,
+            "content": "", "symbols": ["AAPL"], "source": "benzinga",
+        }
+
+    calls = 0
+    orig = store._upsert_article_locked
+
+    async def flaky(normalized, *, source_kind):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("boom")
+        return await orig(normalized, source_kind=source_kind)
+
+    monkeypatch.setattr(store, "_upsert_article_locked", flaky)
+    with pytest.raises(RuntimeError):
+        await worker._persist_batch(
+            [payload(1, "2026-04-28T19:00:00Z"), payload(2, "2026-04-28T19:00:01Z")]
+        )
+    # The batch rolled back: nothing committed, watermark untouched.
+    assert state.last_seen_updated_at is None
+    assert await store.get_article(1) is None

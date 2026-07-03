@@ -1,80 +1,113 @@
 # alpaca-news-mcp
 
-Docker-served MCP server that ingests Alpaca's real-time news WebSocket and exposes
-the data to MCP clients (Claude Code, Codex) over Streamable HTTP.
+Docker-served MCP server that ingests Alpaca's real-time **news** WebSocket and
+the **v2 stock market-data** WebSocket (trades, quotes, bars, trading halts,
+LULD bands) and exposes everything to MCP clients (Claude Code, Codex) over
+Streamable HTTP. It is the data layer for an LLM trading harness: bounded,
+token-efficient, delta-pollable tools backed by local SQLite caches.
 
-The server maintains exactly **one** Alpaca news WebSocket connection per running
-container, normalizes and persists every news article to a local SQLite database,
-and serves bounded read-only MCP tools and resources backed by that local cache.
+- News: `wss://stream.data.alpaca.markets/v1beta1/news` → `/data/alpaca_news.sqlite`
+- Stocks: `wss://stream.data.alpaca.markets/v2/{feed}` (default `sip`, msgpack) → `/data/alpaca_market.sqlite`
+- REST context: screener movers/most-actives, snapshots, market clock/calendar,
+  corporate actions, historical bars (gap-fill)
 
 ## What this MCP does
 
-- Connects to `wss://stream.data.alpaca.markets/v1beta1/news` once.
-- Authenticates with header-based auth, falling back to message auth.
-- Subscribes with `news:["*"]` for maximum coverage.
-- Persists every `T="n"` news article (normalized + raw payload).
-- Indexes articles by symbol and tracks per-article version history when
-  `headline`, `summary`, `content`, or `updated_at` changes.
-- Generates deterministic alerts (M&A, financing, earnings, analyst, legal,
-  halt risk, breaking, interest-symbol matches, high latency, stream errors).
-- Optionally backfills on startup and after reconnects via Alpaca's REST news API.
-- Exposes everything through MCP tools and resources at `http://localhost:8000/mcp`.
-- Exposes a plain `/healthz` HTTP endpoint for Docker healthchecks.
+- Maintains exactly **one** news WebSocket and **one** stock WebSocket per
+  container (Alpaca's connection limit is per endpoint, so the two coexist).
+- News: subscribes `news:["*"]`, persists + versions every article, strips HTML
+  off the event loop, FTS5 full-text search, REST backfill on startup and
+  reconnect gap-fill (with retries + alerts), replay of queue-dropped articles.
+- Stocks: full-depth ingestion (trades/quotes/bars/updatedBars/dailyBars/
+  statuses/lulds) for a runtime-adjustable watchlist (≤100 symbols); batched
+  `executemany` writes; in-memory latest-per-symbol snapshot cache; minute-bar
+  gap-fill via REST after reconnects; rolling tick retention (4h default).
+- Deterministic alerts: keyword groups (configurable via `ALERT_KEYWORDS_FILE`),
+  bullish/bearish direction tagging, cross-source dedup by content hash,
+  per-symbol rate limiting, trading-halt/resume/LULD alerts, stream health
+  alerts (stale feed, auth failure, gap-fill failure, coverage gaps).
+- Delta-polling cursors (`get_news_since`, `get_alerts_since`, `get_bars_since`)
+  so a polling harness fetches exactly what's new — no overlapping windows.
+- Reliability: idle watchdog (market-clock-gated for stocks), reconnect backoff
+  that resets after stable sessions, slow-cadence retry + critical alerts on
+  auth failure, `/healthz` reporting both streams.
 
 ## What this MCP does NOT do
 
-- It does **not** place trades, cancel orders, or call any trading endpoints.
-- It does **not** open more than one Alpaca news WebSocket.
+- It does **not** place trades, cancel orders, or call any order/position
+  endpoint. The trading-API host is used ONLY for read-only `GET /v2/clock`
+  and `GET /v2/calendar`.
+- It does **not** open more than one Alpaca WebSocket per endpoint.
 - It does **not** integrate FMP, FRED, SEC EDGAR, or any other data provider.
-- It does **not** subscribe to stock trades/quotes/bars/statuses/LULDs, options, or
-  crypto streams.
-- It does **not** make trading decisions from headlines.
+- It does **not** make trading decisions.
 
 ## ⚠️ Alpaca connection-limit warning
 
-Alpaca limits Algo Trader Plus and most other subscriptions to **one active
-WebSocket connection per user per endpoint**. A second connection returns
-`406 connection limit exceeded`.
-
-To stay safe:
+Alpaca limits most subscriptions to **one active WebSocket connection per user
+per endpoint**. A second connection to the same endpoint returns
+`406 connection limit exceeded`. The news and stock streams are different
+endpoints — one of each is fine; two containers are not.
 
 - **Run one container at a time.** `docker-compose.yml` enforces `replicas: 1`.
-- **Do not run a second copy of the server** with the same Alpaca credentials.
-- **Prefer Streamable HTTP MCP transport** (this repo's default). Many Claude/Codex
-  clients can share one running container that owns one Alpaca WebSocket. stdio
-  mode is risky because it can launch a new container per client.
 - On `406` the server backs off `CONNECTION_LIMIT_BACKOFF_SECONDS` (default 90s)
-  and surfaces the state via `get_news_stream_health()` and `/healthz`.
+  and surfaces the state via the health tools and `/healthz`.
 
 ## Required environment variables
 
-Copy `.env.example` to `.env` and edit:
+Copy `.env.example` to `.env` and edit. Core variables:
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `ALPACA_API_KEY` | yes | — | Alpaca API key id |
-| `ALPACA_SECRET_KEY` | yes | — | Alpaca API secret |
-| `ALPACA_NEWS_STREAM_URL` | no | `wss://stream.data.alpaca.markets/v1beta1/news` | Override for sandbox |
-| `ALPACA_DATA_BASE_URL` | no | `https://data.alpaca.markets` | REST base URL |
-| `MCP_HOST` / `MCP_PORT` / `MCP_PATH` | no | `0.0.0.0` / `8000` / `/mcp` | HTTP binding |
-| `STORAGE_PATH` | no | `/data/alpaca_news.sqlite` | SQLite DB path |
-| `LOG_LEVEL` | no | `info` | `debug`/`info`/`warning`/`error` |
-| `NEWS_SUBSCRIPTION_MODE` | no | `wildcard` | `wildcard` or `fallback` |
-| `NEWS_FALLBACK_SYMBOLS` | no | (empty) | Comma list used if wildcard rejected |
-| `NEWS_INTEREST_SYMBOLS` | no | `AAPL,MSFT,NVDA,TSLA,SPY,QQQ` | Local-only filter for alerts |
-| `ENABLE_REST_BACKFILL` | no | `true` | Backfill on startup + gap-fill on reconnect |
-| `BACKFILL_LOOKBACK_MINUTES` | no | `60` | Startup window |
-| `REST_BACKFILL_OVERLAP_SECONDS` | no | `180` | Reconnect overlap |
-| `REST_INCLUDE_CONTENT` | no | `true` | Pass `include_content=true` to REST |
-| `REST_EXCLUDE_CONTENTLESS` | no | `false` | Pass `exclude_contentless=true` to REST |
-| `MAX_RECENT_ARTICLES_MEMORY` | no | `5000` | In-memory deque bound |
-| `EVENT_RETENTION_DAYS` | no | `14` | Article retention |
-| `RAW_EVENT_RETENTION_DAYS` | no | `7` | Raw-event retention |
-| `RECONNECT_MIN_SECONDS` / `RECONNECT_MAX_SECONDS` | no | `5` / `120` | Backoff bounds |
-| `CONNECTION_LIMIT_BACKOFF_SECONDS` | no | `90` | Sleep after `406` |
-| `QUEUE_MAXSIZE` | no | `10000` | Bounded WS-to-persister queue |
-| `ENABLE_MANUAL_REST_BACKFILL` | no | `true` | Exposes `run_news_rest_backfill` tool |
-| `MCP_READ_ONLY` | no | `true` | Reserved for future use |
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` | — (required) | Alpaca credentials |
+| `MCP_HOST` / `MCP_PORT` / `MCP_PATH` | `0.0.0.0` / `8000` / `/mcp` | HTTP binding |
+| `STORAGE_PATH` | `/data/alpaca_news.sqlite` | News + alerts DB |
+| `LOG_LEVEL` | `info` | Logging |
+
+News stream:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ALPACA_NEWS_STREAM_URL` | `wss://stream.data.alpaca.markets/v1beta1/news` | Override for sandbox |
+| `NEWS_SUBSCRIPTION_MODE` | `wildcard` | `wildcard` or `fallback` |
+| `NEWS_FALLBACK_SYMBOLS` | (empty) | Used if wildcard rejected (409) |
+| `NEWS_INTEREST_SYMBOLS` | `AAPL,MSFT,NVDA,TSLA,SPY,QQQ` | Alert escalation filter |
+| `NEWS_IDLE_RECONNECT_SECONDS` | `0` (off) | Idle watchdog (news is quiet overnight; ping/pong covers dead sockets) |
+| `ENABLE_REST_BACKFILL` | `true` | Startup backfill + reconnect gap-fill |
+| `BACKFILL_LOOKBACK_MINUTES` / `REST_BACKFILL_OVERLAP_SECONDS` | `60` / `180` | Backfill windows |
+| `EVENT_RETENTION_DAYS` / `RAW_EVENT_RETENTION_DAYS` | `14` / `7` | News retention |
+| `RETENTION_INTERVAL_SECONDS` | `3600` | News pruner cadence (also runs at startup) |
+
+Stock stream:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ENABLE_STOCK_STREAM` | `true` | Master switch |
+| `ALPACA_STOCK_FEED` | `sip` | `sip` / `iex` / `delayed_sip` |
+| `ALPACA_STOCK_STREAM_URL` | (derived) | Override; use `wss://stream.data.alpaca.markets/v2/test` for smoke tests |
+| `STOCK_STREAM_CODEC` | `msgpack` | `msgpack` or `json` |
+| `STOCK_WATCHLIST_SYMBOLS` | `AAPL,MSFT,NVDA,TSLA,SPY,QQQ` | Initial watchlist (runtime-adjustable, persisted) |
+| `STOCK_CHANNELS` | all seven | Subset of `trades,quotes,bars,updatedBars,dailyBars,statuses,lulds` |
+| `STOCK_IDLE_RECONNECT_SECONDS` | `120` | Idle watchdog (only fires while market open) |
+| `STOCK_QUEUE_MAXSIZE` / `STOCK_BATCH_MAX` | `50000` / `2000` | Ingest queue / batch commit size |
+| `STOCK_QUOTE_SAMPLE_MS` | `0` (store all) | First knob to turn if the market DB grows too fast |
+| `MARKET_STORAGE_PATH` | `/data/alpaca_market.sqlite` | Tick/bar DB |
+| `STOCK_TICK_RETENTION_MINUTES` / `STOCK_BAR_RETENTION_DAYS` | `240` / `30` | Market retention |
+| `MARKET_RETENTION_INTERVAL_SECONDS` | `900` | Market pruner cadence |
+
+Reliability & alerts:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STABLE_CONNECTION_SECONDS` | `60` | Session length that resets reconnect backoff |
+| `AUTH_RETRY_SECONDS` / `AUTH_ALERT_EVERY_N` | `900` / `4` | 402 retry cadence + re-alert period |
+| `RECONNECT_MIN_SECONDS` / `RECONNECT_MAX_SECONDS` | `5` / `120` | Backoff bounds |
+| `CONNECTION_LIMIT_BACKOFF_SECONDS` | `90` | Sleep after `406` |
+| `ALERT_KEYWORDS_FILE` | (empty) | JSON merged over built-in keyword groups |
+| `ALERT_RATE_LIMIT_PER_SYMBOL_HOUR` | `10` | Per-(symbols,category) cap; critical exempt |
+| `HALT_ALERT_DEDUP_SECONDS` | `300` | Halt/LULD alert dedup window |
+
+REST context: `ALPACA_DATA_BASE_URL`, `ALPACA_TRADING_BASE_URL` (paper by
+default; clock/calendar only), and `MARKET_CACHE_*_TTL` cache tunables.
 
 Secrets are never logged or exposed via tools/resources.
 
@@ -85,153 +118,118 @@ cp .env.example .env
 # edit .env with your real Alpaca credentials
 
 docker compose up --build -d
-
-# verify health
 curl http://localhost:8000/healthz
 ```
 
-The compose file mounts a named volume `alpaca-news-data` at `/data` so the SQLite
-file (and its WAL/SHM siblings) survive container restarts.
+The compose file mounts a named volume at `/data` so both SQLite files survive
+restarts. Existing news databases are migrated in place at startup
+(`PRAGMA user_version` migrations: seq cursor, FTS index, alert columns).
 
-## Claude Code setup
+## Client setup
 
 ```bash
 claude mcp add --transport http alpaca-news http://localhost:8000/mcp
-```
-
-After this, the alpaca-news MCP appears in Claude Code's tool list.
-
-## Codex setup
-
-CLI:
-
-```bash
+# or
 codex mcp add alpaca_news --url http://localhost:8000/mcp
-codex mcp list
-```
-
-Or in `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.alpaca_news]
-url = "http://localhost:8000/mcp"
-startup_timeout_sec = 20
-tool_timeout_sec = 60
-enabled = true
 ```
 
 ## Tools
 
-### Health and status
-- `get_news_stream_health` — connection state, subscription state, counters, last-message timestamps.
-- `get_news_subscription_state` — requested vs Alpaca-acknowledged subscription.
+### Delta polling (recommended for a trading-loop harness)
+- `get_news_since(cursor, limit, symbols, fields)` — articles newer than the
+  cursor, oldest first; updated articles re-surface. `fields=compact` is ~6
+  fields per article.
+- `get_alerts_since(cursor, limit, severity, categories)`
+- `get_bars_since(cursor, symbols, timeframe, limit)` — compact array rows.
 
-### Article retrieval
-- `get_recent_news(minutes, symbols, sources, limit, include_content, include_raw)`
-- `get_news_article(article_id, include_content, include_raw, include_versions, version_limit)`
-- `search_news(query, symbols, since, until, limit, include_content)`
-- `get_news_for_symbols(symbols, minutes, limit_per_symbol, include_content)`
+Each returns `next_cursor` + `has_more`; pass `next_cursor` back verbatim.
+
+### News
+- `get_recent_news(minutes, symbols, sources, limit, include_content, include_raw, fields)`
+- `get_news_article(article_id, ...)`, `get_news_versions(article_id, limit)`
+- `search_news(query, symbols, since, until, limit, fields)` — FTS5 ranked
+  (porter stemming), substring LIKE fallback
+- `get_news_for_symbols(symbols, minutes, limit_per_symbol, fields)`
 - `get_breaking_news_digest(minutes, symbols, max_articles)`
+- `run_news_rest_backfill(minutes)`
 
-### Symbols & alerts
-- `set_interest_symbols(symbols, mode=replace|add|remove|clear)`
-- `get_interest_symbols`
-- `get_news_alerts(minutes, severity, categories, symbols, limit)`
-- `ack_news_alert(alert_id)`
-- `get_news_symbol_map(minutes, min_articles)`
+### Market data (stream-backed)
+- `get_latest_market_data(symbols, include)` — in-memory snapshot cache;
+  REST fallback for non-watchlist symbols
+- `get_trades_window(symbol, minutes, limit)` / `get_quotes_window(...)`
+- `get_stock_bars(symbol, timeframe, start, end, limit)`
+- `get_trading_halts(minutes, symbols)` — statuses + LULD
+- `set_stock_watchlist(symbols, mode)` / `get_stock_watchlist()` — live
+  subscribe/unsubscribe deltas, persisted across restarts
 
-### Diagnostics
-- `get_news_latency_stats(minutes)`
-- `get_news_ingestion_stats(minutes)`
-- `get_raw_news_events(minutes, limit)`
-- `get_news_versions(article_id, limit)`
-- `run_news_rest_backfill(minutes)` (returns `{"error":"disabled"}` when
-  `ENABLE_MANUAL_REST_BACKFILL=false`)
+### Market context (REST, TTL-cached)
+- `get_market_movers(top)` / `get_most_active_stocks(by, top)` — "what's in
+  play today"
+- `get_stock_snapshots(symbols)` — trade+quote+bars+prev-day per symbol
+- `get_market_clock()` / `get_market_calendar(start, end)`
+- `get_corporate_actions(symbols, types, start, end, limit)`
 
-All tools enforce response limits (default 50 articles, 100 raw events,
-50 versions, 4000 chars per content_text; hard caps 200 articles, 500 raw
-events, 200 versions, 500 alerts) and return
-`{"error":"limit_exceeded","max_allowed":N,"requested":M}` when exceeded.
-`get_news_versions` and `get_news_article(include_versions=True)` also
-report `versions_total` so callers can detect truncation.
+### Symbols, alerts, diagnostics
+- `set_interest_symbols(symbols, mode)` / `get_interest_symbols()`
+- `get_news_alerts(minutes, severity, categories, symbols, limit)` /
+  `ack_news_alert(alert_id)` — alerts carry `direction: bullish|bearish|neutral`
+- `get_news_symbol_map`, `get_news_latency_stats`, `get_news_ingestion_stats`,
+  `get_raw_news_events`
+- `get_news_stream_health()` / `get_news_subscription_state()` /
+  `get_stock_stream_health()`
+
+All tools enforce bounded responses and return structured errors
+(`{"error":"limit_exceeded",...}`, `{"error":"stock_stream_disabled"}`, ...).
 
 ## Resources
 
-- `alpaca-news://health`
-- `alpaca-news://subscription`
-- `alpaca-news://recent`
-- `alpaca-news://alerts`
-- `alpaca-news://symbols`
-- `alpaca-news://symbols/{symbol}`
-- `alpaca-news://article/{article_id}`
-- `alpaca-news://stats/latency`
-- `alpaca-news://stats/ingestion`
-
-## REST backfill behavior
-
-- **Startup**: when `ENABLE_REST_BACKFILL=true`, the server queries Alpaca News REST
-  for the last `BACKFILL_LOOKBACK_MINUTES` minutes (sort=asc, limit=50, paginated
-  by `next_page_token`) before opening the WebSocket.
-- **Reconnect gap-fill**: after a successful reconnect, the server re-queries from
-  `last_seen_updated_at - REST_BACKFILL_OVERLAP_SECONDS` to recover anything missed
-  during the disconnect.
-- **Manual**: `run_news_rest_backfill(minutes=N)` runs an ad-hoc backfill (subject
-  to `ENABLE_MANUAL_REST_BACKFILL`).
-- **Rate limits**: `429` honors `Retry-After`; `403` marks `entitlement_error`.
-
-## Troubleshooting
-
-- **`402 auth failed`** — check `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`. The server
-  marks this fatal and stops reconnecting until restarted with new credentials.
-- **`406 connection limit exceeded`** — another process is using your Alpaca slot.
-  Stop any other Alpaca WebSocket clients (including older containers, paper
-  scripts, etc.) and the server will recover after `CONNECTION_LIMIT_BACKOFF_SECONDS`.
-- **`407 slow client`** — the server should never trigger this in practice
-  thanks to its bounded queue + persister coroutine. If you see it, increase
-  `QUEUE_MAXSIZE` or check for I/O stalls.
-- **`409 insufficient subscription`** — your Alpaca plan doesn't grant the
-  requested feed. The server marks `entitlement_error=true` and falls back to
-  REST if enabled.
-- **No articles received** — confirm `/healthz` shows `stream_connected=true`
-  and `authenticated=true`, then check `get_news_subscription_state` for the
-  Alpaca-acknowledged subscription.
-
-## Security notes
-
-- Never commit `.env`. The `.dockerignore` and `.gitignore` exclude it.
-- API keys are read from environment, never logged. The logger has a
-  redaction filter that scrubs them from any log line where they appear.
-- Article HTML is treated as untrusted and stripped to plain text before being
-  returned via tools/resources. Raw HTML remains in storage for fidelity but is
-  only returned when explicitly requested with `include_raw=true`.
-- No tool calls non-Alpaca APIs. No tool places trades.
-
-## Test commands
-
-```bash
-# Unit + fixture + WebSocket fixture tests (offline)
-python -m pytest tests -q
-
-# Lint & types
-python -m ruff check src tests
-python -m mypy src
-
-# Build the Docker image
-docker build -t alpaca-news-mcp .
-```
+`alpaca-news://health|subscription|recent|alerts|symbols|symbols/{s}|article/{id}|stats/latency|stats/ingestion`
+and `alpaca-market://watchlist|latest/{symbol}|clock|halts`.
 
 ## Architecture in 30 seconds
 
 ```
-Alpaca WS  →  recv loop  →  bounded asyncio.Queue  →  persister
-                                                          ↓
-                                          normalize → SQLite (WAL) + caches
-                                                          ↓
-                                                   AlertEngine (deterministic)
-                                                          ↑
-                                MCP tools/resources read here only
+Alpaca news WS ──▶ recv loop ─▶ queue ─▶ batch persister ─▶ news SQLite (WAL, FTS5)
+                                             │                    ▲
+                                             ├─▶ AlertEngine ─────┘ (one alert feed)
+Alpaca stock WS ─▶ recv loop ─▶ queue ─▶ batch persister ─▶ market SQLite (WAL)
+   (msgpack)                                 └─▶ snapshot cache (latest per symbol)
+REST (TTL-cached): backfill, bars gap-fill, screener, snapshots, clock/calendar
+
+MCP tools/resources read ONLY from the SQLite stores + snapshot cache + REST cache.
 ```
 
-The recv loop only does `orjson.loads` + `queue.put_nowait`. All persistence,
-versioning, alerting, and retention pruning happen on the persister coroutine
-or a background retention task.
+Both workers share `ws_base.BaseStreamWorker`: bounded queue with backpressure
+and visible drops, drain-batched commits (no added latency for single
+messages), idle watchdog, backoff reset after stable sessions, and slow-cadence
+auth-failure retry with critical alerts. Normalization (HTML stripping) runs in
+a thread so bursts never stall the recv loops.
+
+## Troubleshooting
+
+- **`402 auth failed`** — bad credentials. The worker retries every
+  `AUTH_RETRY_SECONDS` and records critical alerts; `/healthz` shows
+  `auth_failed: true`.
+- **`406 connection limit exceeded`** — another process is using your Alpaca
+  slot for that endpoint. Stop other clients; the server recovers after the
+  backoff.
+- **`409 insufficient subscription`** — your plan doesn't grant the feed; the
+  server flags `entitlement_error` (news falls back to REST/symbol list).
+- **Stale feed** — `stale_reconnects` in health counts watchdog-forced
+  reconnects; `stream_stale` alerts fire at most hourly.
+- **Market DB too big** — set `STOCK_QUOTE_SAMPLE_MS=250` (or trim
+  `STOCK_CHANNELS` / watchlist); snapshot cache stays exact regardless.
+
+## Test commands
+
+```bash
+python -m pytest tests -q          # unit + fixture + fake-WS tests (offline)
+python -m ruff check src tests
+python -m mypy src
+docker build -t alpaca-news-mcp .
+```
+
+Credential-free live smoke test of the stock pipeline: set
+`ALPACA_STOCK_STREAM_URL=wss://stream.data.alpaca.markets/v2/test`,
+`STOCK_WATCHLIST_SYMBOLS=FAKEPACA` and watch `get_latest_market_data`
+(the test stream emits fake `FAKEPACA` data around the clock).

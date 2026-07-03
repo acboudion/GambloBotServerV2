@@ -19,7 +19,13 @@ AlertCategory = Literal[
     "halt_risk_keyword",
     "high_latency",
     "stream_error",
+    "stream_stale",
     "entitlement_error",
+    "gap_fill_failure",
+    "coverage_gap",
+    "trading_halt",
+    "trading_resume",
+    "luld",
 ]
 
 
@@ -41,6 +47,7 @@ class NewsArticle(BaseModel):
     update_count: int = 0
     latency_ms: int | None = None
     is_content_present: bool = False
+    seq: int | None = None
     raw: dict[str, Any] | None = None
 
 
@@ -65,6 +72,7 @@ class Alert(BaseModel):
     headline: str | None = None
     reason: str
     acknowledged: bool = False
+    direction: Literal["bullish", "bearish", "neutral"] = "neutral"
 
 
 class SubscriptionState(BaseModel):
@@ -72,7 +80,6 @@ class SubscriptionState(BaseModel):
     acknowledged: dict[str, list[str]] | None = None
     mode: Literal["wildcard", "fallback", "rest_only", "disconnected"] = "disconnected"
     last_ack_at: str | None = None
-    notes: str | None = None
 
 
 class StreamHealth(BaseModel):
@@ -87,6 +94,10 @@ class StreamHealth(BaseModel):
     last_error: str | None = None
     connection_attempts: int = 0
     reconnect_count: int = 0
+    stale_reconnects: int = 0
+    auth_failed: bool = False
+    gap_fill_failures: int = 0
+    dropped_replayed: int = 0
     connection_limit_blocked: bool = False
     entitlement_error: bool = False
     rest_backfill_enabled: bool = False
@@ -112,9 +123,3 @@ class IngestionStats(BaseModel):
     distinct_symbols: int
     distinct_sources: int
     raw_event_count: int
-
-
-class LimitExceededError(BaseModel):
-    error: Literal["limit_exceeded"] = "limit_exceeded"
-    max_allowed: int
-    requested: int

@@ -24,7 +24,7 @@ async def app(tmp_path, monkeypatch):
     cfg = Config.from_env()
     store = await Store.open(cfg.storage_path)
     await store.init_schema()
-    state = State(max_recent_articles=cfg.max_recent_articles_memory)
+    state = State()
     state.set_interest_symbols(cfg.news_interest_symbols, "replace")
     alerts = AlertEngine()
     rest = RestBackfillWorker(cfg, store, state, alerts)
@@ -307,3 +307,51 @@ async def test_get_breaking_news_digest_clamps_non_positive_max(app, bad_max):
     out = await _call(mcp, "get_breaking_news_digest", minutes=60, max_articles=bad_max)
     assert "error" not in out
     assert len(out["articles"]) <= 1
+
+
+@pytest.mark.asyncio
+async def test_get_news_for_symbols_caps_symbol_count(app):
+    """One query per symbol x limit_per_symbol rows each — an unbounded
+    symbol list would multiply past the bounded-response contract."""
+    mcp = build_mcp()
+    out = await _call(
+        mcp, "get_news_for_symbols", symbols=[f"S{i}" for i in range(51)]
+    )
+    assert out["error"] == "limit_exceeded"
+    assert out["max_allowed"] == 50
+    ok = await _call(mcp, "get_news_for_symbols", symbols=["AAPL"])
+    assert "symbols" in ok
+
+
+@pytest.mark.asyncio
+async def test_symbol_filters_capped_across_news_tools(app):
+    """Optional symbol filters feed per-symbol SQL placeholders — every
+    news tool must reject oversized lists structurally."""
+    mcp = build_mcp()
+    big = [f"S{i}" for i in range(51)]
+    for tool, kwargs in [
+        ("get_recent_news", {"symbols": big}),
+        ("get_news_since", {"symbols": big}),
+        ("search_news", {"query": "x", "symbols": big}),
+        ("get_breaking_news_digest", {"symbols": big}),
+        ("get_news_alerts", {"symbols": big}),
+    ]:
+        out = await _call(mcp, tool, **kwargs)
+        assert out["error"] == "limit_exceeded", tool
+        assert out["max_allowed"] == 50, tool
+
+
+@pytest.mark.asyncio
+async def test_category_and_source_filters_capped(app):
+    """categories/sources filters feed per-item SQL placeholders like symbols
+    — oversized lists must return structured errors, not raise."""
+    mcp = build_mcp()
+    big = [f"c{i}" for i in range(51)]
+    for tool, kwargs in [
+        ("get_alerts_since", {"categories": big}),
+        ("get_news_alerts", {"categories": big}),
+        ("get_recent_news", {"sources": big}),
+    ]:
+        out = await _call(mcp, tool, **kwargs)
+        assert out["error"] == "limit_exceeded", tool
+        assert out["max_allowed"] == 50, tool

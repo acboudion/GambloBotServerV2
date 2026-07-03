@@ -1,0 +1,237 @@
+"""MarketDataClient: TTL caching, 429 retry, endpoint parsing (respx-mocked)."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+from alpaca_news_mcp.config import Config
+from alpaca_news_mcp.market_client import MarketDataClient
+
+
+@pytest.fixture
+def config(monkeypatch, tmp_path) -> Config:
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "t.sqlite"))
+    return Config.from_env()
+
+
+@pytest.fixture
+async def client(config):
+    c = MarketDataClient(config)
+    yield c
+    await c.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clock_is_cached(client):
+    route = respx.get("https://paper-api.alpaca.markets/v2/clock").mock(
+        return_value=httpx.Response(
+            200,
+            json={"timestamp": "2026-07-02T10:00:00-04:00", "is_open": True,
+                  "next_open": "x", "next_close": "y"},
+        )
+    )
+    first = await client.clock()
+    second = await client.clock()
+    assert first == second
+    assert first["is_open"] is True
+    assert route.call_count == 1  # second call served from TTL cache
+    assert await client.is_market_open() is True
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_clock_unavailable_returns_none(client):
+    respx.get("https://paper-api.alpaca.markets/v2/clock").mock(
+        return_value=httpx.Response(500, text="boom")
+    )
+    assert await client.clock() is None
+    assert await client.is_market_open() is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_429_retries_once_with_retry_after(client):
+    route = respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers")
+    route.side_effect = [
+        httpx.Response(429, headers={"Retry-After": "0"}),
+        httpx.Response(200, json={"gainers": [{"symbol": "UP", "percent_change": 12.0}],
+                                  "losers": [], "market_type": "stocks"}),
+    ]
+    payload = await client.movers(top=5)
+    assert payload["gainers"][0]["symbol"] == "UP"
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_most_actives_and_snapshot_paths(client):
+    respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/most-actives").mock(
+        return_value=httpx.Response(
+            200, json={"most_actives": [{"symbol": "TSLA", "volume": 1000}]}
+        )
+    )
+    actives = await client.most_actives(by="volume", top=5)
+    assert actives["most_actives"][0]["symbol"] == "TSLA"
+
+    respx.get("https://data.alpaca.markets/v2/stocks/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={"AAPL": {"latestTrade": {"p": 190.5},
+                           "latestQuote": {"bp": 190.4, "ap": 190.6},
+                           "minuteBar": {"c": 190.5}, "dailyBar": {"c": 190.0},
+                           "prevDailyBar": {"c": 188.0}}},
+        )
+    )
+    snaps = await client.snapshots(["aapl"])
+    assert snaps["AAPL"]["latestTrade"]["p"] == 190.5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_latest_and_corporate_actions(client):
+    respx.get("https://data.alpaca.markets/v2/stocks/trades/latest").mock(
+        return_value=httpx.Response(200, json={"trades": {"MSFT": {"p": 400.0}}})
+    )
+    latest = await client.latest("trades", ["MSFT"])
+    assert latest["trades"]["MSFT"]["p"] == 400.0
+    with pytest.raises(ValueError):
+        await client.latest("bogus", ["MSFT"])
+
+    respx.get("https://data.alpaca.markets/v1/corporate-actions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"corporate_actions": {"forward_splits": [{"symbol": "NVDA", "new_rate": 10}]}},
+        )
+    )
+    ca = await client.corporate_actions(symbols=["NVDA"], start="2026-06-01", end="2026-07-01")
+    assert ca["corporate_actions"]["forward_splits"][0]["symbol"] == "NVDA"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_pagination(client):
+    route = respx.get("https://data.alpaca.markets/v2/stocks/bars")
+    route.side_effect = [
+        httpx.Response(200, json={"bars": {"AAPL": [{"t": "2026-07-02T13:30:00Z", "c": 1.0}]},
+                                  "next_page_token": "tok"}),
+        httpx.Response(200, json={"bars": {"AAPL": [{"t": "2026-07-02T13:31:00Z", "c": 2.0}]},
+                                  "next_page_token": None}),
+    ]
+    bars = await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+    assert [b["c"] for b in bars["AAPL"]] == [1.0, 2.0]
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_page_failure_raises_instead_of_partial_success(client):
+    """A failed bars page must raise so gap-fill retry/alerting engages —
+    returning a partial dict would make the backfill look complete."""
+    from alpaca_news_mcp.market_client import MarketDataError
+
+    route = respx.get("https://data.alpaca.markets/v2/stocks/bars")
+    route.side_effect = [
+        httpx.Response(200, json={"bars": {"AAPL": [{"t": "2026-07-02T13:30:00Z", "c": 1.0}]},
+                                  "next_page_token": "tok"}),
+        httpx.Response(500, text="boom"),
+    ]
+    with pytest.raises(MarketDataError):
+        await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_pagination_truncation_raises(client, monkeypatch):
+    """Hitting the page cap with a next_page_token still set means data
+    remains — must raise, not silently return the partial result."""
+    import alpaca_news_mcp.market_client as mc
+
+    monkeypatch.setattr(mc, "MAX_BARS_PAGES", 1)
+    respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bars": {"AAPL": [{"t": "2026-07-02T13:30:00Z", "c": 1.0}]},
+                  "next_page_token": "more"},
+        )
+    )
+    with pytest.raises(mc.MarketDataError, match="truncated"):
+        await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_sends_configured_feed(client):
+    """Backfilled bars must come from the same feed the stream ingests —
+    omitting `feed` lets Alpaca pick the account default and mix feeds."""
+    route = respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(200, json={"bars": {}, "next_page_token": None})
+    )
+    await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+    assert route.calls[0].request.url.params["feed"] == "sip"  # config default
+
+    await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z", feed="iex")
+    assert route.calls[1].request.url.params["feed"] == "iex"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_latest_and_snapshots_send_configured_feed(client):
+    """REST fallbacks merged with stream data must come from the same feed."""
+    latest_route = respx.get("https://data.alpaca.markets/v2/stocks/trades/latest").mock(
+        return_value=httpx.Response(200, json={"trades": {}})
+    )
+    await client.latest("trades", ["AAPL"])
+    assert latest_route.calls[0].request.url.params["feed"] == "sip"
+
+    snap_route = respx.get("https://data.alpaca.markets/v2/stocks/snapshots").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    await client.snapshots(["AAPL"])
+    assert snap_route.calls[0].request.url.params["feed"] == "sip"
+
+
+def test_retry_after_seconds_handles_all_header_forms():
+    """delta-seconds, HTTP-date, and malformed values must all yield a bounded
+    float — a 429 must never crash the request path with ValueError."""
+    from alpaca_news_mcp.market_client import retry_after_seconds
+
+    assert retry_after_seconds("2", default=1.0) == 2.0
+    assert retry_after_seconds(None, default=1.0) == 1.0
+    assert retry_after_seconds("", default=1.0) == 1.0
+    # HTTP-date in the past clamps to 0 (retry immediately).
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", default=1.0) == 0.0
+    # Malformed → default, not ValueError.
+    assert retry_after_seconds("soon", default=3.0) == 3.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_429_with_http_date_retry_after_does_not_crash(client):
+    """A 429 carrying an HTTP-date Retry-After must retry (not raise), so MCP
+    tools keep returning structured errors instead of exceptions."""
+    route = respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers")
+    route.side_effect = [
+        httpx.Response(
+            429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        ),
+        httpx.Response(200, json={"gainers": [], "losers": []}),
+    ]
+    out = await client.movers(top=5)
+    assert out == {"gainers": [], "losers": []}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_non_json_body_returns_none_not_exception(client):
+    """HTTP 200 with a non-JSON body must surface as an upstream failure
+    (None), not a JSONDecodeError out of the MCP tool."""
+    respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers").mock(
+        return_value=httpx.Response(200, text="<html>gateway error</html>")
+    )
+    assert await client.movers(top=5) is None

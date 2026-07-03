@@ -20,7 +20,19 @@ CREATE TABLE IF NOT EXISTS news_articles (
     last_seen_source TEXT NOT NULL,
     update_count INTEGER NOT NULL DEFAULT 0,
     latency_ms INTEGER,
-    is_content_present INTEGER NOT NULL DEFAULT 0
+    is_content_present INTEGER NOT NULL DEFAULT 0,
+    seq INTEGER
+);
+-- NOTE: idx_articles_seq is created by migration m1 (migrations.py), which also
+-- backfills seq for databases created before the column existed. schema.sql runs
+-- before migrations, so the index cannot live here without breaking old DBs.
+
+-- External-content FTS index over article text. Synced explicitly in
+-- Store.upsert_article / prune_retention; rebuilt for old DBs by migration m2.
+CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
+    headline, summary, content_text,
+    content='news_articles', content_rowid='id',
+    tokenize='porter unicode61'
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_created_at ON news_articles(created_at);
@@ -63,7 +75,8 @@ CREATE TABLE IF NOT EXISTS raw_events (
     received_at TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     message_type TEXT,
-    raw_json TEXT NOT NULL
+    raw_json TEXT NOT NULL,
+    replayed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_events_received_at ON raw_events(received_at);
@@ -86,6 +99,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     reason TEXT NOT NULL,
     acknowledged INTEGER NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
+    content_hash TEXT,
+    direction TEXT NOT NULL DEFAULT 'neutral',
     FOREIGN KEY(article_id) REFERENCES news_articles(id)
 );
 

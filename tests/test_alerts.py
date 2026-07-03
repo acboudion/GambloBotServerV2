@@ -130,3 +130,266 @@ def test_stream_error_alert_classification():
     b = eng.stream_error_alert(code=409, message="insufficient subscription", entitlement=True)
     assert b.category == "entitlement_error"
     assert b.severity == "critical"
+
+
+# ---- alert engine upgrades (keywords file, direction, rate limit, dedup) -----
+
+import json as _json  # noqa: E402
+
+from alpaca_news_mcp.alerts import AlertEngine as _Engine  # noqa: E402
+from alpaca_news_mcp.models import NewsArticle as _Article  # noqa: E402
+
+
+def _mk_article(id=1, headline="h", symbols=("AAPL",), summary=None):
+    return _Article(
+        id=id,
+        headline=headline,
+        summary=summary,
+        first_seen_at="2026-07-02T10:00:00+00:00",
+        last_seen_at="2026-07-02T10:00:00+00:00",
+        last_seen_source="ws",
+        symbols=list(symbols),
+    )
+
+
+def test_corporate_action_group_fires_dead_category_no_more():
+    engine = _Engine()
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Board approves 10-for-1 stock split"),
+        interest_symbols=set(),
+    )
+    cats = {a.category for a in alerts}
+    assert "corporate_action_keyword" in cats
+
+
+def test_direction_tagging_bullish_vs_bearish():
+    engine = _Engine()
+    beats = engine.evaluate_article(
+        _mk_article(headline="MegaCorp beats earnings, raises outlook"),
+        interest_symbols=set(),
+    )
+    earnings = [a for a in beats if a.category == "earnings_keyword"]
+    assert earnings[0].direction == "bullish"
+
+    misses = engine.evaluate_article(
+        _mk_article(id=2, headline="MegaCorp misses earnings, cuts outlook"),
+        interest_symbols=set(),
+    )
+    earnings = [a for a in misses if a.category == "earnings_keyword"]
+    assert earnings[0].direction == "bearish"
+
+
+def test_keywords_file_merge(tmp_path):
+    kw = tmp_path / "kw.json"
+    kw.write_text(_json.dumps({
+        "mna": {"phrases": ["scheme of arrangement"]},
+        "custom_topic": {"phrases": ["quantum widget"], "bullish": ["quantum widget"]},
+    }))
+    engine = _Engine(keywords_file=str(kw))
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Target agrees to scheme of arrangement"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "mna_keyword" for a in alerts)
+    # Unknown group maps to breaking_keyword.
+    alerts = engine.evaluate_article(
+        _mk_article(id=3, headline="Quantum widget shipped"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "breaking_keyword" for a in alerts)
+
+
+def test_keywords_file_bad_json_falls_back(tmp_path):
+    kw = tmp_path / "kw.json"
+    kw.write_text("{not json")
+    engine = _Engine(keywords_file=str(kw))
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Merger announced"), interest_symbols=set()
+    )
+    assert any(a.category == "mna_keyword" for a in alerts)
+
+
+def test_rate_limit_suppresses_but_critical_exempt():
+    engine = _Engine(rate_limit_per_symbol_hour=2)
+    # Quota is charged only when an alert is actually inserted
+    # (count_emission), mirroring what the persisters do.
+    for i in range(2):
+        for a in engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        ):
+            if a.category == "analyst_keyword":
+                engine.count_emission(a)
+    # Bucket full: further analyst alerts for the same symbol set suppress.
+    total = sum(
+        1
+        for i in range(5, 10)
+        for a in engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    )
+    assert total == 0
+    assert engine.suppressed_alerts >= 3
+
+    # Critical alerts bypass the limiter entirely.
+    crit = engine.evaluate_article(
+        _mk_article(id=99, headline="Bankruptcy filing"), interest_symbols=set()
+    )
+    assert any(a.severity == "critical" for a in crit)
+
+
+def test_deduped_alerts_do_not_consume_rate_limit_quota():
+    """Evaluating (or store-deduping) an alert must not burn quota — only a
+    confirmed insert does. Duplicate syndicated stories should never exhaust
+    the bucket and suppress a later distinct alert."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    # Ten evaluations with NO confirmed insert (as if every one was deduped).
+    for i in range(10):
+        alerts = engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        )
+        assert any(a.category == "analyst_keyword" for a in alerts), i
+    assert engine.suppressed_alerts == 0
+    # One confirmed insert charges the bucket...
+    charged = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=100, headline="Analyst upgrade real"),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    engine.count_emission(charged[0])
+    # ...and only now does the next one suppress.
+    after = engine.evaluate_article(
+        _mk_article(id=101, headline="Analyst upgrade again"),
+        interest_symbols=set(),
+    )
+    assert not any(a.category == "analyst_keyword" for a in after)
+
+
+def test_rate_limit_is_per_symbol_not_per_symbol_set():
+    """Co-mentions must not route around a symbol's hourly cap: ['AAPL'] and
+    ['AAPL', 'MSFT'] check and charge the same AAPL bucket."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    # Fill AAPL's analyst bucket via a single-symbol alert.
+    single = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1, headline="Analyst upgrade"), interest_symbols=set()
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert len(single) == 1
+    engine.count_emission(single[0])
+    # A co-mention including AAPL is suppressed by AAPL's full bucket.
+    co = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=2, headline="Analyst upgrade again", symbols=("AAPL", "MSFT")),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert co == []
+    assert engine.suppressed_alerts >= 1
+    # An unrelated symbol's bucket is unaffected.
+    other = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=3, headline="Analyst upgrade elsewhere", symbols=("NVDA",)),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert len(other) == 1
+
+
+def test_interest_alerts_respect_rate_limit():
+    """held_or_interested_symbol alerts must obey the per-symbol hourly cap
+    like every other non-critical category."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    first = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1), interest_symbols={"AAPL"}
+        )
+        if a.category == "held_or_interested_symbol"
+    ]
+    assert len(first) == 1
+    engine.count_emission(first[0])
+    # Bucket full: the next distinct article's interest alert suppresses.
+    again = engine.evaluate_article(_mk_article(id=2), interest_symbols={"AAPL"})
+    assert not any(a.category == "held_or_interested_symbol" for a in again)
+    assert engine.suppressed_alerts >= 1
+
+
+def test_high_latency_alerts_respect_rate_limit():
+    """high_latency alerts must obey the per-symbol hourly cap like every
+    other non-critical category — a burst of delayed articles for one symbol
+    must not flood the alert feed."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    engine.high_latency_alert_ms = 1000
+
+    def slow_article(i):
+        a = _mk_article(id=i)
+        return a.model_copy(update={"latency_ms": 5000})
+
+    first = [
+        a for a in engine.evaluate_article(slow_article(1), interest_symbols=set())
+        if a.category == "high_latency"
+    ]
+    assert len(first) == 1
+    engine.count_emission(first[0])
+    again = engine.evaluate_article(slow_article(2), interest_symbols=set())
+    assert not any(a.category == "high_latency" for a in again)
+    assert engine.suppressed_alerts >= 1
+
+
+def test_pending_charges_enforce_quota_within_a_batch():
+    """Provisional (pending) charges must count against the limiter for later
+    evaluations in the same open batch, then commit or discard atomically."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    first = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1, headline="Analyst upgrade"), interest_symbols=set()
+        )
+        if a.category == "analyst_keyword"
+    ]
+    engine.count_emission(first[0], pending=True)
+    # Same batch, second distinct article: suppressed by the pending charge.
+    again = engine.evaluate_article(
+        _mk_article(id=2, headline="Analyst upgrade again"), interest_symbols=set()
+    )
+    assert not any(a.category == "analyst_keyword" for a in again)
+    # Rollback: the pending charge disappears and the alert flows again.
+    engine.discard_pending()
+    ok = engine.evaluate_article(
+        _mk_article(id=3, headline="Analyst upgrade back"), interest_symbols=set()
+    )
+    assert any(a.category == "analyst_keyword" for a in ok)
+    # Commit: the charge becomes durable.
+    engine.count_emission(
+        next(a for a in ok if a.category == "analyst_keyword"), pending=True
+    )
+    engine.commit_pending()
+    after = engine.evaluate_article(
+        _mk_article(id=4, headline="Analyst upgrade after"), interest_symbols=set()
+    )
+    assert not any(a.category == "analyst_keyword" for a in after)
+
+
+def test_breaking_marker_with_trailing_punctuation_matches():
+    """Phrases ending in punctuation ("alert:") must match in real headlines
+    like "Alert: ..." — a trailing \\b after the colon would require a word
+    character next and never fire before a space."""
+    engine = _Engine()
+    out = engine.evaluate_article(
+        _mk_article(headline="Alert: unusual volume in shares"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "breaking_keyword" for a in out)
+    # The word-char guard still applies: "sec" must not match inside "secured".
+    none = engine.evaluate_article(
+        _mk_article(id=2, headline="Company secured a new deal"),
+        interest_symbols=set(),
+    )
+    assert not any("sec" in a.reason for a in none)

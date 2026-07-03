@@ -58,6 +58,6 @@ def alert_engine() -> AlertEngine:
 
 @pytest.fixture
 def state(config) -> State:
-    s = State(max_recent_articles=config.max_recent_articles_memory)
+    s = State()
     s.set_interest_symbols(["AAPL", "MSFT"], "replace")
     return s

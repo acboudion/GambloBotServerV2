@@ -278,3 +278,133 @@ async def test_raw_event_recording(open_store):
     assert len(events) == 1
     assert events[0]["message_type"] == "error_406"
     assert events[0]["raw"] == {"foo": 1}
+
+
+@pytest.mark.asyncio
+async def test_upsert_result_article_matches_db_row(open_store):
+    """upsert_article builds its returned article in Python (no re-SELECT);
+    it must be byte-identical to what a subsequent get_article reads back —
+    on insert, on a partial update (COALESCE keeps old values), and on an
+    unchanged re-delivery."""
+    # Insert
+    r1 = await open_store.upsert_article(
+        normalize_news_message(_payload(900)), source_kind="ws"
+    )
+    db1 = await open_store.get_article(900)
+    assert r1.article.model_dump(exclude={"last_seen_at", "first_seen_at"}) == \
+        db1.model_dump(exclude={"last_seen_at", "first_seen_at"})
+    assert r1.article.first_seen_at == db1.first_seen_at
+
+    # Partial update: summary omitted → existing kept; headline changes.
+    partial = {"T": "n", "id": 900, "headline": "changed headline",
+               "updated_at": "2026-04-28T21:00:00Z"}
+    r2 = await open_store.upsert_article(
+        normalize_news_message(partial), source_kind="rest"
+    )
+    db2 = await open_store.get_article(900)
+    assert r2.article.model_dump(exclude={"last_seen_at", "raw"}) == \
+        db2.model_dump(exclude={"last_seen_at", "raw"})
+    assert r2.article.summary == "summary"  # kept via COALESCE
+    assert r2.article.headline == "changed headline"
+    assert r2.article.update_count == db2.update_count == 1
+    assert r2.article.seq == db2.seq
+
+    # Unchanged re-delivery: seq stays put.
+    r3 = await open_store.upsert_article(
+        normalize_news_message(partial), source_kind="rest"
+    )
+    db3 = await open_store.get_article(900)
+    assert r3.article.seq == db3.seq == r2.article.seq
+    assert r3.article.update_count == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_writer_commits_once_and_persists(open_store):
+    async with open_store.batch_writer() as w:
+        for i in range(5):
+            await w.upsert_article(
+                normalize_news_message(_payload(1000 + i)), source_kind="ws"
+            )
+    arts = await open_store.get_recent_articles(minutes=60, limit=50)
+    assert {a.id for a in arts} >= {1000, 1001, 1002, 1003, 1004}
+
+
+@pytest.mark.asyncio
+async def test_batch_writer_rolls_back_on_error(open_store):
+    with pytest.raises(RuntimeError):
+        async with open_store.batch_writer() as w:
+            await w.upsert_article(
+                normalize_news_message(_payload(2000)), source_kind="ws"
+            )
+            raise RuntimeError("boom")
+    assert await open_store.get_article(2000) is None
+    # The store stays usable after the rollback.
+    await open_store.upsert_article(
+        normalize_news_message(_payload(2001)), source_kind="ws"
+    )
+    assert await open_store.get_article(2001) is not None
+
+
+@pytest.mark.asyncio
+async def test_alert_cross_source_dedup_by_content_hash(open_store):
+    """The same story under a different article id (same content hash) must
+    not produce a second alert in the same category within 24h."""
+    from alpaca_news_mcp.models import Alert
+
+    await open_store.upsert_article(
+        normalize_news_message(_payload(1, headline="MegaCorp merger")),
+        source_kind="ws",
+    )
+    await open_store.upsert_article(
+        normalize_news_message(_payload(2, headline="MegaCorp merger repost")),
+        source_kind="ws",
+    )
+
+    def _alert(alert_id, article_id):
+        from datetime import UTC, datetime
+        return Alert(
+            alert_id=alert_id, article_id=article_id,
+            created_at=datetime.now(UTC).isoformat(),
+            severity="high", category="mna_keyword", symbols=["AAPL"],
+            reason="keyword match",
+        )
+
+    assert await open_store.record_alert(
+        _alert("a1", 1), raw_json="{}", content_hash="samehash"
+    )
+    # Different article, same content hash + category → deduped.
+    assert not await open_store.record_alert(
+        _alert("a2", 2), raw_json="{}", content_hash="samehash"
+    )
+    # Different category still records.
+    from alpaca_news_mcp.models import Alert as A
+    other = _alert("a3", 2).model_copy(update={"category": "breaking_keyword"})
+    assert isinstance(other, A)
+    assert await open_store.record_alert(other, raw_json="{}", content_hash="samehash")
+    # Direction round-trips through get_alerts.
+    alerts = await open_store.get_alerts(minutes=5, limit=10)
+    assert all(a.direction == "neutral" for a in alerts)
+
+
+@pytest.mark.asyncio
+async def test_batch_writer_rolls_back_when_commit_fails(open_store, monkeypatch):
+    """A commit failure (SQLITE_BUSY / I/O) must roll back — an open
+    transaction would let a later unrelated write commit this failed batch."""
+    import sqlite3
+
+    async def failing_commit():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(open_store.conn, "commit", failing_commit)
+    with pytest.raises(sqlite3.OperationalError):
+        async with open_store.batch_writer() as w:
+            await w.upsert_article(
+                normalize_news_message(_payload(3000)), source_kind="ws"
+            )
+    monkeypatch.undo()
+    # A later successful write must not resurrect the failed batch's rows.
+    await open_store.upsert_article(
+        normalize_news_message(_payload(3001)), source_kind="ws"
+    )
+    assert await open_store.get_article(3000) is None
+    assert await open_store.get_article(3001) is not None
