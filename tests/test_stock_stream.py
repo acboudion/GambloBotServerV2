@@ -636,3 +636,19 @@ async def test_watchdog_inert_with_empty_watchlist(wired):
     assert await worker.watchdog_should_fire() is True  # symbols + open market
     await worker.update_watchlist([], mode="replace")
     assert await worker.watchdog_should_fire() is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_inert_for_event_only_channels(wired):
+    """statuses/lulds-only subscriptions have no steady message flow — the
+    watchdog must not treat healthy silence as a stall during market hours."""
+    cfg, store, market_store, state, alerts = wired
+    cfg_events = replace(cfg, stock_channels=["statuses", "lulds"])
+    worker = _worker(cfg_events, store, market_store, state, alerts,
+                     market_client=_FakeMarketClient())
+    assert await worker.watchdog_should_fire() is False
+    StockStreamWorker.reset_singleton()
+    cfg_chatty = replace(cfg, stock_channels=["trades", "statuses"])
+    worker2 = _worker(cfg_chatty, store, market_store, state, alerts,
+                      market_client=_FakeMarketClient())
+    assert await worker2.watchdog_should_fire() is True

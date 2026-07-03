@@ -117,3 +117,43 @@ async def test_prune_removes_fts_rows(open_store):
     row = await cur.fetchone()
     await cur.close()
     assert row[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_prune_survives_recent_alert_on_expired_article(open_store):
+    """A recent alert referencing an expired article must not trip the
+    alerts.article_id foreign key mid-prune — that used to abort AFTER the
+    FTS purge with no rollback, leaving FTS missing rows for live articles."""
+    from alpaca_news_mcp.models import Alert
+
+    await _ingest(
+        open_store,
+        _payload(1, "ancient story with fresh alert",
+                 updated_at="2020-01-01T00:00:00Z"),
+    )
+    await open_store.conn.execute(
+        "UPDATE news_articles SET first_seen_at = '2020-01-01T00:00:00+00:00' WHERE id = 1"
+    )
+    await open_store.conn.commit()
+    # Alert created NOW (newer than the cutoff) referencing the old article.
+    assert await open_store.record_alert(
+        Alert(
+            alert_id="fresh-on-old",
+            article_id=1,
+            created_at="2099-01-01T00:00:00+00:00",
+            severity="high",
+            category="mna_keyword",
+            symbols=["AAPL"],
+            headline="h",
+            reason="r",
+        ),
+        raw_json="{}",
+    )
+    counts = await open_store.prune_retention(event_days=14, raw_event_days=7)
+    assert counts["articles"] == 1
+    assert counts["alerts"] >= 1  # the referencing alert went with it
+    assert not await open_store.search_articles(query="ancient", limit=10)
+    cur = await open_store.conn.execute("SELECT COUNT(*) FROM alerts")
+    row = await cur.fetchone()
+    await cur.close()
+    assert row[0] == 0

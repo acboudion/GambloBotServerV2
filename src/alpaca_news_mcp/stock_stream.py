@@ -282,6 +282,11 @@ class StockStreamWorker(BaseStreamWorker):
             # An intentionally cleared watchlist means silence is EXPECTED —
             # reconnecting on the idle timer all day would just churn.
             return False
+        if not set(self._channels) & {"trades", "quotes", "bars"}:
+            # Event-only subscriptions (statuses/lulds/updatedBars/dailyBars)
+            # have no steady message flow — silence during market hours is a
+            # healthy subscription, not a stall.
+            return False
         if self._market_client is None:
             return False
         try:

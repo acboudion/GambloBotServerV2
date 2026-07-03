@@ -1073,42 +1073,57 @@ class Store:
         cutoff_articles = (now - timedelta(days=event_days)).isoformat()
         cutoff_raw = (now - timedelta(days=raw_event_days)).isoformat()
         async with self._write_lock:
-            # Purge FTS rows first — external-content FTS5 needs the old column
-            # values, which are gone once the articles are deleted.
-            await self.conn.execute(
-                "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
-                "SELECT 'delete', id, headline, summary, content_text "
-                "FROM news_articles WHERE first_seen_at < ?",
-                (cutoff_articles,),
-            )
-            cur = await self.conn.execute(
-                "DELETE FROM news_article_versions "
-                "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
-                (cutoff_articles,),
-            )
-            v = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM news_symbol_index "
-                "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
-                (cutoff_articles,),
-            )
-            s = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM news_articles WHERE first_seen_at < ?",
-                (cutoff_articles,),
-            )
-            a = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM raw_events WHERE received_at < ?",
-                (cutoff_raw,),
-            )
-            r = cur.rowcount or 0
-            cur = await self.conn.execute(
-                "DELETE FROM alerts WHERE created_at < ?",
-                (cutoff_articles,),
-            )
-            al = cur.rowcount or 0
-            await self.conn.commit()
+            # Everything below must land (or vanish) together: the FTS purge
+            # runs first because external-content FTS5 needs the old column
+            # values, so a mid-sequence failure without rollback would leave
+            # FTS rows deleted for articles that still exist.
+            try:
+                await self.conn.execute(
+                    "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
+                    "SELECT 'delete', id, headline, summary, content_text "
+                    "FROM news_articles WHERE first_seen_at < ?",
+                    (cutoff_articles,),
+                )
+                cur = await self.conn.execute(
+                    "DELETE FROM news_article_versions "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                v = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM news_symbol_index "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                s = cur.rowcount or 0
+                # Alerts referencing expiring articles must go BEFORE the
+                # articles themselves — a recent alert on an old article would
+                # otherwise trip the alerts.article_id foreign key.
+                cur = await self.conn.execute(
+                    "DELETE FROM alerts "
+                    "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",
+                    (cutoff_articles,),
+                )
+                al = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM news_articles WHERE first_seen_at < ?",
+                    (cutoff_articles,),
+                )
+                a = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM raw_events WHERE received_at < ?",
+                    (cutoff_raw,),
+                )
+                r = cur.rowcount or 0
+                cur = await self.conn.execute(
+                    "DELETE FROM alerts WHERE created_at < ?",
+                    (cutoff_articles,),
+                )
+                al += cur.rowcount or 0
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
         return {
             "articles": a,
             "versions": v,
