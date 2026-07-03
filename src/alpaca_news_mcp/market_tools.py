@@ -409,6 +409,10 @@ def register(mcp: FastMCP) -> None:
         _, market_store = parts
         if limit > MAX_STATUSES:
             return _limit_exceeded(MAX_STATUSES, limit)
+        # Symbols feed per-symbol SQL placeholders in two queries — reject
+        # oversized lists structurally like the other symbol-filtered tools.
+        if symbols and len(symbols) > MAX_LATEST_SYMBOLS:
+            return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
         statuses = await market_store.recent_statuses(
             minutes=max(1, minutes), symbols=symbols, limit=max(1, limit)
         )

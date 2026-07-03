@@ -383,3 +383,15 @@ async def test_get_bars_since_caps_symbol_count(app):
     )
     assert out["error"] == "limit_exceeded"
     assert out["max_allowed"] == 50
+
+
+@pytest.mark.asyncio
+async def test_get_trading_halts_caps_symbol_count(app):
+    """symbols feeds per-symbol SQL placeholders in two queries — oversized
+    lists must be rejected structurally."""
+    mcp = build_mcp()
+    out = await _call(
+        mcp, "get_trading_halts", symbols=[f"S{i}" for i in range(51)]
+    )
+    assert out["error"] == "limit_exceeded"
+    assert out["max_allowed"] == 50
