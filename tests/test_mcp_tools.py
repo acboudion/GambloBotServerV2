@@ -339,3 +339,19 @@ async def test_symbol_filters_capped_across_news_tools(app):
         out = await _call(mcp, tool, **kwargs)
         assert out["error"] == "limit_exceeded", tool
         assert out["max_allowed"] == 50, tool
+
+
+@pytest.mark.asyncio
+async def test_category_and_source_filters_capped(app):
+    """categories/sources filters feed per-item SQL placeholders like symbols
+    — oversized lists must return structured errors, not raise."""
+    mcp = build_mcp()
+    big = [f"c{i}" for i in range(51)]
+    for tool, kwargs in [
+        ("get_alerts_since", {"categories": big}),
+        ("get_news_alerts", {"categories": big}),
+        ("get_recent_news", {"sources": big}),
+    ]:
+        out = await _call(mcp, tool, **kwargs)
+        assert out["error"] == "limit_exceeded", tool
+        assert out["max_allowed"] == 50, tool
