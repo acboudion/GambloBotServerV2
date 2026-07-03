@@ -331,18 +331,25 @@ class BaseStreamWorker:
                 self._state.update_health(
                     self.stream_name, authenticated=True, auth_failed=False
                 )
+                # The watermark must be captured BEFORE on_authenticated:
+                # the news subscribe handshake can already consume and enqueue
+                # data frames batched with the subscription ack, and a
+                # persisted post-gap article would advance the watermark past
+                # the outage window. (_sessions_authed is pre-increment here,
+                # so > 0 means "this is a reconnect".)
+                will_gap_fill = self._gap_fill is not None and (
+                    self._sessions_authed > 0 or self.gap_fill_on_first_session()
+                )
+                watermark: Any = None
+                if will_gap_fill:
+                    watermark = await self.capture_gap_fill_watermark()
                 await self.on_authenticated(ws)
                 self._sessions_authed += 1
                 self._ws = ws
                 # Recover anything missed while disconnected. Runs AFTER the
                 # subscription is live (so nothing new is missed during the
-                # fill) and concurrently with the receive loop. The watermark
-                # is captured NOW — before any post-reconnect message can be
-                # persisted and advance it past the outage window.
-                if self._gap_fill is not None and (
-                    self._sessions_authed > 1 or self.gap_fill_on_first_session()
-                ):
-                    watermark = await self.capture_gap_fill_watermark()
+                # fill) and concurrently with the receive loop.
+                if will_gap_fill:
                     self._spawn_gap_fill(watermark)
                 await self._receive_loop(ws)
             finally:

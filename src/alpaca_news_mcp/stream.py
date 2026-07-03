@@ -382,6 +382,7 @@ class NewsStreamWorker(BaseStreamWorker):
                             content_hash=normalized.content_hash,
                         )
                         if inserted:
+                            self._alerts.count_emission(alert)
                             pending_alerts.append(alert)
         # Count alerts only after the batch commit actually lands.
         for alert in pending_alerts:

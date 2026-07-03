@@ -211,12 +211,16 @@ def test_keywords_file_bad_json_falls_back(tmp_path):
 
 def test_rate_limit_suppresses_but_critical_exempt():
     engine = _Engine(rate_limit_per_symbol_hour=2)
-    for i in range(5):
-        engine.evaluate_article(
+    # Quota is charged only when an alert is actually inserted
+    # (count_emission), mirroring what the persisters do.
+    for i in range(2):
+        for a in engine.evaluate_article(
             _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
             interest_symbols=set(),
-        )
-    # Only 2 analyst alerts allowed per hour for the same symbol set.
+        ):
+            if a.category == "analyst_keyword":
+                engine.count_emission(a)
+    # Bucket full: further analyst alerts for the same symbol set suppress.
     total = sum(
         1
         for i in range(5, 10)
@@ -234,3 +238,33 @@ def test_rate_limit_suppresses_but_critical_exempt():
         _mk_article(id=99, headline="Bankruptcy filing"), interest_symbols=set()
     )
     assert any(a.severity == "critical" for a in crit)
+
+
+def test_deduped_alerts_do_not_consume_rate_limit_quota():
+    """Evaluating (or store-deduping) an alert must not burn quota — only a
+    confirmed insert does. Duplicate syndicated stories should never exhaust
+    the bucket and suppress a later distinct alert."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    # Ten evaluations with NO confirmed insert (as if every one was deduped).
+    for i in range(10):
+        alerts = engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        )
+        assert any(a.category == "analyst_keyword" for a in alerts), i
+    assert engine.suppressed_alerts == 0
+    # One confirmed insert charges the bucket...
+    charged = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=100, headline="Analyst upgrade real"),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    engine.count_emission(charged[0])
+    # ...and only now does the next one suppress.
+    after = engine.evaluate_article(
+        _mk_article(id=101, headline="Analyst upgrade again"),
+        interest_symbols=set(),
+    )
+    assert not any(a.category == "analyst_keyword" for a in after)

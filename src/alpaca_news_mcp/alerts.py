@@ -188,22 +188,36 @@ class AlertEngine:
             return "bearish"
         return "neutral"
 
+    @staticmethod
+    def _quota_key(symbols: list[str], category: str) -> tuple[str, str]:
+        return (",".join(sorted(s.upper() for s in symbols)), category)
+
     def _rate_limited(
         self, symbols: list[str], category: str, severity: Severity
     ) -> bool:
-        """Per-(symbols, category) hourly cap. Critical alerts are exempt."""
+        """Per-(symbols, category) hourly cap check. Critical alerts exempt.
+        Checks only — quota is charged via count_emission() once the alert is
+        actually inserted, so store-level dedup (same content hash) doesn't
+        burn quota and suppress later distinct alerts."""
         if self.rate_limit_per_symbol_hour <= 0 or severity == "critical":
             return False
-        key = (",".join(sorted(s.upper() for s in symbols)), category)
         now = time.monotonic()
-        times = self._emit_times.setdefault(key, deque())
+        times = self._emit_times.setdefault(self._quota_key(symbols, category), deque())
         while times and now - times[0] > 3600:
             times.popleft()
         if len(times) >= self.rate_limit_per_symbol_hour:
             self.suppressed_alerts += 1
             return True
-        times.append(now)
         return False
+
+    def count_emission(self, alert: Alert) -> None:
+        """Charge the hourly quota for an alert that was actually inserted.
+        Persisters call this after Store.record_alert returns True."""
+        if self.rate_limit_per_symbol_hour <= 0 or alert.severity == "critical":
+            return
+        self._emit_times.setdefault(
+            self._quota_key(alert.symbols, alert.category), deque()
+        ).append(time.monotonic())
 
     def _market_alert_deduped(self, symbol: str, category: str) -> bool:
         """True when an identical (symbol, category) alert fired recently."""

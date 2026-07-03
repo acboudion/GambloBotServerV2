@@ -276,6 +276,7 @@ class RestBackfillWorker:
                     content_hash=normalized.content_hash,
                 )
                 if inserted:
+                    self._alerts.count_emission(alert)
                     self._state.record_alert(alert)
         if result.was_new:
             return "new"
