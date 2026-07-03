@@ -81,6 +81,10 @@ class Config:
     reconnect_min_seconds: int
     reconnect_max_seconds: int
     connection_limit_backoff_seconds: int
+    stable_connection_seconds: int
+    news_idle_reconnect_seconds: int
+    auth_retry_seconds: int
+    auth_alert_every_n: int
 
     queue_maxsize: int
     slow_client_warning_queue_depth: int
@@ -130,6 +134,10 @@ class Config:
             reconnect_min_seconds=_get_int("RECONNECT_MIN_SECONDS", 5),
             reconnect_max_seconds=_get_int("RECONNECT_MAX_SECONDS", 120),
             connection_limit_backoff_seconds=_get_int("CONNECTION_LIMIT_BACKOFF_SECONDS", 90),
+            stable_connection_seconds=_get_int("STABLE_CONNECTION_SECONDS", 60),
+            news_idle_reconnect_seconds=_get_int("NEWS_IDLE_RECONNECT_SECONDS", 0),
+            auth_retry_seconds=_get_int("AUTH_RETRY_SECONDS", 900),
+            auth_alert_every_n=_get_int("AUTH_ALERT_EVERY_N", 4),
             queue_maxsize=_get_int("QUEUE_MAXSIZE", 10_000),
             slow_client_warning_queue_depth=_get_int("SLOW_CLIENT_WARNING_QUEUE_DEPTH", 7500),
             queue_backpressure_seconds=_get_float("QUEUE_BACKPRESSURE_SECONDS", 2.0),

@@ -170,6 +170,22 @@ class AlertEngine:
 
         return alerts
 
+    def stream_stale_alert(self, *, stream: str, idle_seconds: float) -> Alert:
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="high",
+            category="stream_stale",
+            symbols=[],
+            headline=None,
+            reason=(
+                f"{stream} stream received no messages for {idle_seconds:.0f}s; "
+                "watchdog forced a reconnect"
+            ),
+            acknowledged=False,
+        )
+
     def stream_error_alert(
         self, *, code: int, message: str, entitlement: bool = False
     ) -> Alert:

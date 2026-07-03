@@ -19,6 +19,7 @@ AlertCategory = Literal[
     "halt_risk_keyword",
     "high_latency",
     "stream_error",
+    "stream_stale",
     "entitlement_error",
 ]
 
@@ -87,6 +88,8 @@ class StreamHealth(BaseModel):
     last_error: str | None = None
     connection_attempts: int = 0
     reconnect_count: int = 0
+    stale_reconnects: int = 0
+    auth_failed: bool = False
     connection_limit_blocked: bool = False
     entitlement_error: bool = False
     rest_backfill_enabled: bool = False
