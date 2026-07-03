@@ -162,3 +162,18 @@ async def test_bars_pagination_truncation_raises(client, monkeypatch):
     )
     with pytest.raises(mc.MarketDataError, match="truncated"):
         await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_sends_configured_feed(client):
+    """Backfilled bars must come from the same feed the stream ingests —
+    omitting `feed` lets Alpaca pick the account default and mix feeds."""
+    route = respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(200, json={"bars": {}, "next_page_token": None})
+    )
+    await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+    assert route.calls[0].request.url.params["feed"] == "sip"  # config default
+
+    await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z", feed="iex")
+    assert route.calls[1].request.url.params["feed"] == "iex"

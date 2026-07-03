@@ -263,9 +263,14 @@ class MarketDataClient:
         end_iso: str | None = None,
         timeframe: str = "1Min",
         limit_per_page: int = 1000,
+        feed: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Paginated /v2/stocks/bars for multiple symbols. Returns
         {SYMBOL: [bar dicts with t/o/h/l/c/v/n/vw]}. Not cached (gap-fill use).
+
+        `feed` defaults to the configured stream feed so backfilled bars come
+        from the same feed the WebSocket ingests — otherwise Alpaca picks the
+        account's best feed and gap-fill could mix feeds within one series.
 
         Raises MarketDataError when any page fails — a partial result must not
         look like a completed backfill, or the gap-fill retry/alert path in
@@ -279,6 +284,7 @@ class MarketDataClient:
             "timeframe": timeframe,
             "start": start_iso,
             "limit": limit_per_page,
+            "feed": feed or self._config.alpaca_stock_feed,
         }
         if end_iso:
             params["end"] = end_iso
