@@ -189,21 +189,32 @@ def register(mcp: FastMCP) -> None:
         # only — statuses/LULD have no latest REST endpoint).
         rest_kinds = {"trade": "trades", "quote": "quotes", "bar": "bars"}
         wanted_rest = [k for k in include if k in rest_kinds]
+        missing_fields: dict[str, list[str]] = {}
         if missing and app.market_client is not None and wanted_rest:
-            still_missing = set(missing)
+            filled: dict[str, set[str]] = {}
             for key in wanted_rest:
                 payload = await app.market_client.latest(rest_kinds[key], missing)
                 if not payload:
                     continue
                 for sym_u, value in (payload.get(rest_kinds[key]) or {}).items():
-                    out.setdefault(sym_u.upper(), {})[key] = value
-                    still_missing.discard(sym_u.upper())
-            if len(still_missing) < len(missing):
+                    sym_up = sym_u.upper()
+                    out.setdefault(sym_up, {})[key] = value
+                    filled.setdefault(sym_up, set()).add(key)
+            if filled:
                 source = "stream+rest"
-            missing = sorted(still_missing)
+            # A symbol only leaves `missing` once some REST data arrived for
+            # it; any requested REST-backed field that still didn't come back
+            # is reported per symbol so partial context never looks complete.
+            missing_fields = {
+                sym: absent
+                for sym, got in sorted(filled.items())
+                if (absent := sorted(set(wanted_rest) - got))
+            }
+            missing = sorted(s for s in missing if s not in filled)
         return {
             "symbols": out,
             "missing": missing,
+            "missing_fields": missing_fields,
             "source": source,
             "as_of": datetime.now(UTC).isoformat(),
         }

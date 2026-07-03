@@ -310,6 +310,30 @@ async def test_latest_market_data_rest_fallback(app_with_client):
     assert out["symbols"]["AAPL"]["trade"]["p"] == 190.5
     assert out["symbols"]["MSFT"]["trade"]["p"] == 400.0
     assert out["missing"] == []
+    assert out["missing_fields"] == {}
+    assert out["source"] == "stream+rest"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_latest_market_data_partial_rest_fill_reports_missing_fields(app_with_client):
+    """A symbol that got only some of the requested REST fields must not look
+    complete: unfilled fields are reported per symbol, and symbols with no
+    data at all stay in `missing`."""
+    mcp = build_mcp()
+    respx.get("https://data.alpaca.markets/v2/stocks/trades/latest").mock(
+        return_value=httpx.Response(200, json={"trades": {"MSFT": {"p": 400.0}}})
+    )
+    respx.get("https://data.alpaca.markets/v2/stocks/quotes/latest").mock(
+        return_value=httpx.Response(200, json={"quotes": {}})
+    )
+    respx.get("https://data.alpaca.markets/v2/stocks/bars/latest").mock(
+        return_value=httpx.Response(500, json={"error": "boom"})
+    )
+    out = await _call(mcp, "get_latest_market_data", symbols=["MSFT", "ZZZZ"])
+    assert out["symbols"]["MSFT"]["trade"]["p"] == 400.0
+    assert out["missing"] == ["ZZZZ"]
+    assert out["missing_fields"] == {"MSFT": ["bar", "quote"]}
     assert out["source"] == "stream+rest"
 
 

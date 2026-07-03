@@ -373,3 +373,20 @@ async def test_manual_backfill_surfaces_failure(wired):
         mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=success_page))
         result = await worker.manual(30)
     assert result["failure"] is None
+
+
+@pytest.mark.asyncio
+async def test_manual_skipped_by_concurrent_run_reports_failure(wired):
+    """A manual run skipped because another backfill holds the lock fetched
+    nothing for the requested window — it must carry a failure so the MCP
+    tool reports status=incomplete instead of a false ok."""
+    worker, _store, _state, _ = wired
+    await worker._run_lock.acquire()
+    try:
+        result = await worker.manual(30)
+    finally:
+        worker._run_lock.release()
+    assert result["skipped"] == 1
+    assert result["ingested"] == 0
+    assert result["failure"] is not None
+    assert "already running" in result["failure"]

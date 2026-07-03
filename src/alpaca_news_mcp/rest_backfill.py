@@ -31,7 +31,7 @@ class BackfillError(RuntimeError):
     gap-fills so BaseStreamWorker's retry/alert path engages)."""
 
 
-def _empty_counts(*, skipped: int = 0) -> dict[str, Any]:
+def _empty_counts(*, skipped: int = 0, failure: str | None = None) -> dict[str, Any]:
     """Canonical zero-shape so callers can destructure regardless of branch."""
     out: dict[str, Any] = {
         "ingested": 0,
@@ -40,7 +40,7 @@ def _empty_counts(*, skipped: int = 0) -> dict[str, Any]:
         "duplicate": 0,
         "failed": 0,
         "pages": 0,
-        "failure": None,
+        "failure": failure,
     }
     if skipped:
         out["skipped"] = skipped
@@ -129,7 +129,12 @@ class RestBackfillWorker:
             if raise_on_failure:
                 # The concurrent run may not cover this gap window — retry.
                 raise BackfillError("backfill already running; gap window not covered")
-            return _empty_counts(skipped=1)
+            # The requested window was not fetched at all — a skipped run must
+            # surface as incomplete, not as a clean zero-count success.
+            return _empty_counts(
+                skipped=1,
+                failure="another backfill is already running; window not attempted",
+            )
         failure: str | None = None
         async with self._run_lock:
             client = await self._ensure_client()
