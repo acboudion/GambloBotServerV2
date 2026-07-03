@@ -27,6 +27,14 @@ CREATE TABLE IF NOT EXISTS news_articles (
 -- backfills seq for databases created before the column existed. schema.sql runs
 -- before migrations, so the index cannot live here without breaking old DBs.
 
+-- External-content FTS index over article text. Synced explicitly in
+-- Store.upsert_article / prune_retention; rebuilt for old DBs by migration m2.
+CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
+    headline, summary, content_text,
+    content='news_articles', content_rowid='id',
+    tokenize='porter unicode61'
+);
+
 CREATE INDEX IF NOT EXISTS idx_articles_created_at ON news_articles(created_at);
 CREATE INDEX IF NOT EXISTS idx_articles_updated_at ON news_articles(updated_at);
 CREATE INDEX IF NOT EXISTS idx_articles_first_seen_at ON news_articles(first_seen_at);

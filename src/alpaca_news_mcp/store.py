@@ -203,6 +203,12 @@ class Store:
                 normalized, source_kind=source_kind
             )
             await self._upsert_symbol_index(normalized, source_kind=source_kind)
+            await self._fts_insert(
+                normalized.id,
+                normalized.headline,
+                normalized.summary,
+                normalized.content_text,
+            )
             article = NewsArticle(
                 id=normalized.id,
                 headline=normalized.headline,
@@ -309,6 +315,33 @@ class Store:
                     )
             if changed:
                 await self._upsert_symbol_index(normalized, source_kind=source_kind)
+            # Keep the FTS index in step with the stored (post-COALESCE) text.
+            merged_summary = (
+                normalized.summary if normalized.summary is not None else existing["summary"]
+            )
+            merged_content_text = (
+                normalized.content_text
+                if normalized.content_text is not None
+                else existing["content_text"]
+            )
+            fts_changed = (
+                normalized.headline != existing["headline"]
+                or merged_summary != existing["summary"]
+                or merged_content_text != existing["content_text"]
+            )
+            if fts_changed:
+                await self._fts_delete(
+                    normalized.id,
+                    existing["headline"],
+                    existing["summary"],
+                    existing["content_text"],
+                )
+                await self._fts_insert(
+                    normalized.id,
+                    normalized.headline,
+                    merged_summary,
+                    merged_content_text,
+                )
             # Mirror the UPDATE's COALESCE semantics in Python so the caller
             # gets the post-write row without a re-SELECT.
             article = NewsArticle(
@@ -338,6 +371,27 @@ class Store:
             was_new=was_new,
             version_inserted=version_inserted,
             article=article,
+        )
+
+    async def _fts_insert(
+        self, article_id: int, headline: str | None, summary: str | None,
+        content_text: str | None,
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO news_fts(rowid, headline, summary, content_text) "
+            "VALUES (?, ?, ?, ?)",
+            (article_id, headline, summary, content_text),
+        )
+
+    async def _fts_delete(
+        self, article_id: int, headline: str | None, summary: str | None,
+        content_text: str | None,
+    ) -> None:
+        # External-content FTS5 'delete' requires the OLD column values.
+        await self.conn.execute(
+            "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
+            "VALUES ('delete', ?, ?, ?, ?)",
+            (article_id, headline, summary, content_text),
         )
 
     async def _insert_version(
@@ -518,6 +572,74 @@ class Store:
         since: str | None = None,
         until: str | None = None,
         limit: int = 50,
+    ) -> list[NewsArticle]:
+        """Ranked FTS5 search, falling back to substring LIKE when FTS finds
+        nothing (token-based FTS can't match mid-word fragments) or errors."""
+        try:
+            articles = await self._search_articles_fts(
+                query=query, symbols=symbols, since=since, until=until, limit=limit
+            )
+        except aiosqlite.OperationalError as e:
+            log.warning("FTS search failed (%s); falling back to LIKE", e)
+            articles = []
+        if articles:
+            return articles
+        return await self._search_articles_like(
+            query=query, symbols=symbols, since=since, until=until, limit=limit
+        )
+
+    @staticmethod
+    def _fts_match_expression(query: str) -> str:
+        # Quote every token (doubling embedded quotes) so LLM-supplied text can
+        # never be parsed as FTS5 syntax; tokens are implicitly ANDed.
+        tokens = [t for t in query.split() if t]
+        return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+
+    async def _search_articles_fts(
+        self,
+        *,
+        query: str,
+        symbols: list[str] | None,
+        since: str | None,
+        until: str | None,
+        limit: int,
+    ) -> list[NewsArticle]:
+        match = self._fts_match_expression(query)
+        if not match:
+            return []
+        clauses = ["news_fts MATCH ?"]
+        params: list[Any] = [match]
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            clauses.append(
+                f"a.id IN (SELECT article_id FROM news_symbol_index WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        if since:
+            clauses.append("COALESCE(a.updated_at, a.created_at, a.first_seen_at) >= ?")
+            params.append(since)
+        if until:
+            clauses.append("COALESCE(a.updated_at, a.created_at, a.first_seen_at) <= ?")
+            params.append(until)
+        sql = (
+            "SELECT a.* FROM news_fts f JOIN news_articles a ON a.id = f.rowid WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY f.rank LIMIT ?"
+        )
+        params.append(limit)
+        cur = await self.conn.execute(sql, params)
+        rows = await cur.fetchall()
+        await cur.close()
+        return [self._row_to_article(r) for r in rows]
+
+    async def _search_articles_like(
+        self,
+        *,
+        query: str,
+        symbols: list[str] | None,
+        since: str | None,
+        until: str | None,
+        limit: int,
     ) -> list[NewsArticle]:
         like = f"%{query.lower()}%"
         clauses = ["(LOWER(headline) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content_text) LIKE ?)"]
@@ -888,6 +1010,14 @@ class Store:
         cutoff_articles = (now - timedelta(days=event_days)).isoformat()
         cutoff_raw = (now - timedelta(days=raw_event_days)).isoformat()
         async with self._write_lock:
+            # Purge FTS rows first — external-content FTS5 needs the old column
+            # values, which are gone once the articles are deleted.
+            await self.conn.execute(
+                "INSERT INTO news_fts(news_fts, rowid, headline, summary, content_text) "
+                "SELECT 'delete', id, headline, summary, content_text "
+                "FROM news_articles WHERE first_seen_at < ?",
+                (cutoff_articles,),
+            )
             cur = await self.conn.execute(
                 "DELETE FROM news_article_versions "
                 "WHERE article_id IN (SELECT id FROM news_articles WHERE first_seen_at < ?)",

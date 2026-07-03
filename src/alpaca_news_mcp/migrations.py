@@ -66,8 +66,29 @@ async def _m1_news_seq(conn: aiosqlite.Connection) -> None:
     )
 
 
+FTS_CREATE_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS news_fts USING fts5(
+    headline, summary, content_text,
+    content='news_articles', content_rowid='id',
+    tokenize='porter unicode61'
+)
+"""
+
+
+async def _m2_news_fts(conn: aiosqlite.Connection) -> None:
+    """Full-text search over headline/summary/content_text.
+
+    External-content FTS5: rows are synced explicitly by Store.upsert_article
+    and prune_retention (triggers would fight the COALESCE update semantics).
+    The one-time rebuild indexes rows that existed before this migration.
+    """
+    await conn.execute(FTS_CREATE_SQL)
+    await conn.execute("INSERT INTO news_fts(news_fts) VALUES('rebuild')")
+
+
 NEWS_MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _m1_news_seq),
+    (2, _m2_news_fts),
 ]
 
 
