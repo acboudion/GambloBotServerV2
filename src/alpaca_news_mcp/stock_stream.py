@@ -121,15 +121,16 @@ class StockStreamWorker(BaseStreamWorker):
         return self._acknowledged
 
     async def restore_watchlist(self) -> None:
-        """Load the persisted watchlist (survives restarts; set via tool)."""
+        """Load the persisted watchlist (survives restarts; set via tool).
+        An explicitly persisted EMPTY list is honored too — an operator who
+        cleared the stream must not get the config default back on restart."""
         persisted = await self._store.get_status(WATCHLIST_STATUS_KEY)
         if persisted and isinstance(persisted.get("symbols"), list):
             symbols = {
                 str(s).upper() for s in persisted["symbols"] if str(s).strip()
             }
-            if symbols:
-                self._watchlist = symbols
-                log.info("restored stock watchlist: %s", sorted(symbols))
+            self._watchlist = symbols
+            log.info("restored stock watchlist: %s", sorted(symbols) or "(empty)")
 
     async def update_watchlist(
         self, symbols: list[str], mode: str = "replace"
@@ -160,6 +161,14 @@ class StockStreamWorker(BaseStreamWorker):
             await self._store.set_status(
                 WATCHLIST_STATUS_KEY, {"symbols": sorted(new)}
             )
+            if added or removed:
+                # The old acknowledgement no longer describes the desired
+                # subscription; report acknowledged symbols only once Alpaca
+                # acks the new state (trust acks, not requests).
+                self._acknowledged = None
+                self._state.update_health(
+                    self.stream_name, acknowledged_subscription=None
+                )
             ws = self._ws
             sent_delta = False
             if ws is not None and (added or removed):

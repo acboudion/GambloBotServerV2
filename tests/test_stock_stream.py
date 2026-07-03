@@ -475,3 +475,38 @@ async def test_dropped_status_and_luld_are_persisted_not_lost(wired):
     assert state.snapshot_health("stocks").articles_dropped == 1
     since_us = _to_epoch_us("2026-04-28T00:00:00Z")
     assert await market_store.trades_window("AAPL", since_us=since_us, limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_watchlist_mutation_clears_stale_ack(wired):
+    """Changing the watchlist invalidates the previous acknowledgement — the
+    old ack must not be reported for a subscription it no longer describes."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    worker._acknowledged = {"trades": ["AAPL", "TSLA"]}
+    state.update_health("stocks", acknowledged_subscription={"trades": ["AAPL", "TSLA"]})
+
+    await worker.update_watchlist(["NVDA"], mode="add")  # disconnected mutation
+    assert worker.acknowledged_subscription() is None
+    assert state.snapshot_health("stocks").acknowledged_subscription is None
+
+    # A no-op mutation (same set) keeps whatever ack exists.
+    worker._acknowledged = {"trades": ["AAPL", "NVDA", "TSLA"]}
+    await worker.update_watchlist([], mode="remove")
+    assert worker.acknowledged_subscription() == {"trades": ["AAPL", "NVDA", "TSLA"]}
+
+
+@pytest.mark.asyncio
+async def test_restore_honors_persisted_empty_watchlist(wired):
+    """An operator who explicitly cleared the watchlist must not get the
+    config default back after a restart."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    out = await worker.update_watchlist([], mode="replace")
+    assert out["watchlist"] == []
+
+    StockStreamWorker.reset_singleton()
+    worker2 = _worker(cfg, store, market_store, state, alerts)
+    assert worker2.watchlist() == ["AAPL", "TSLA"]  # config default pre-restore
+    await worker2.restore_watchlist()
+    assert worker2.watchlist() == []

@@ -22,6 +22,9 @@ REST_NEWS_PATH = "/v1beta1/news"
 
 IngestStatus = Literal["new", "updated", "duplicate", "failed"]
 
+MAX_BACKFILL_PAGES = 200
+MAX_429_RETRIES = 5
+
 
 class BackfillError(RuntimeError):
     """A backfill that must not be treated as complete (used by reconnect
@@ -143,8 +146,8 @@ class RestBackfillWorker:
             pages = 0
             page_token: str | None = None
             backoff = 1.0
-            max_pages = 200
-            max_429_retries = 5
+            max_pages = MAX_BACKFILL_PAGES
+            max_429_retries = MAX_429_RETRIES
             retries_429 = 0
 
             while pages < max_pages:
@@ -208,6 +211,11 @@ class RestBackfillWorker:
                 backoff = max(1.0, backoff / 2)
                 if not page_token:
                     break
+
+            if failure is None and page_token:
+                # Page cap reached with data remaining — the tail was skipped.
+                failure = f"page cap ({max_pages}) reached with pages remaining"
+                log.warning("rest_backfill %s reason=%s", failure, reason)
 
             if raise_on_failure and failure is not None:
                 raise BackfillError(f"gap-fill incomplete ({failure})")

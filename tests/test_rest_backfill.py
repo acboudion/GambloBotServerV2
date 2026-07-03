@@ -311,3 +311,23 @@ async def test_gap_fill_raises_when_another_backfill_holds_the_lock(wired):
             await worker.gap_fill()
     finally:
         worker._run_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_page_cap_truncates(wired, monkeypatch):
+    """A busy window that still has next_page_token at the page cap is an
+    incomplete fill — must raise so the retry/alert path engages."""
+    import alpaca_news_mcp.rest_backfill as rb
+
+    monkeypatch.setattr(rb, "MAX_BACKFILL_PAGES", 1)
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    page = {
+        "news": [{"id": 900, "headline": "h", "created_at": "2026-04-28T19:01:00Z",
+                  "updated_at": "2026-04-28T19:01:00Z"}],
+        "next_page_token": "more",
+    }
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=page))
+        with pytest.raises(rb.BackfillError, match="page cap"):
+            await worker.gap_fill()
