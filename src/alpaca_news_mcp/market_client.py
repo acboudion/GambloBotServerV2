@@ -25,6 +25,15 @@ log = get_logger(__name__)
 BARS_PATH = "/v2/stocks/bars"
 CLOCK_PATH = "/v2/clock"
 CALENDAR_PATH = "/v2/calendar"
+MOST_ACTIVES_PATH = "/v1beta1/screener/stocks/most-actives"
+MOVERS_PATH = "/v1beta1/screener/stocks/movers"
+SNAPSHOTS_PATH = "/v2/stocks/snapshots"
+LATEST_PATHS = {
+    "trades": "/v2/stocks/trades/latest",
+    "quotes": "/v2/stocks/quotes/latest",
+    "bars": "/v2/stocks/bars/latest",
+}
+CORPORATE_ACTIONS_PATH = "/v1beta1/corporate-actions"
 
 MAX_BARS_PAGES = 40
 
@@ -161,6 +170,84 @@ class MarketDataClient:
         if payload is None:
             return None
         return payload if isinstance(payload, list) else payload.get("calendar")
+
+    # ---- screener --------------------------------------------------------------------
+
+    async def most_actives(self, *, by: str = "volume", top: int = 10) -> dict[str, Any] | None:
+        return await self._get_json(
+            host="data",
+            path=MOST_ACTIVES_PATH,
+            params={"by": by, "top": top},
+            cache_key=f"most_actives:{by}:{top}",
+            ttl=self._config.market_cache_screener_ttl,
+        )
+
+    async def movers(self, *, top: int = 10) -> dict[str, Any] | None:
+        return await self._get_json(
+            host="data",
+            path=MOVERS_PATH,
+            params={"top": top},
+            cache_key=f"movers:{top}",
+            ttl=self._config.market_cache_screener_ttl,
+        )
+
+    # ---- snapshots / latest -----------------------------------------------------------
+
+    async def snapshots(self, symbols: list[str]) -> dict[str, Any] | None:
+        joined = ",".join(sorted({s.upper() for s in symbols}))
+        return await self._get_json(
+            host="data",
+            path=SNAPSHOTS_PATH,
+            params={"symbols": joined},
+            cache_key=f"snapshots:{joined}",
+            ttl=self._config.market_cache_snapshot_ttl,
+        )
+
+    async def latest(self, kind: str, symbols: list[str]) -> dict[str, Any] | None:
+        """kind: trades|quotes|bars. Returns the raw Alpaca payload
+        ({'trades': {SYM: {...}}} etc.)."""
+        path = LATEST_PATHS.get(kind)
+        if path is None:
+            raise ValueError(f"invalid latest kind: {kind}")
+        joined = ",".join(sorted({s.upper() for s in symbols}))
+        return await self._get_json(
+            host="data",
+            path=path,
+            params={"symbols": joined},
+            cache_key=f"latest:{kind}:{joined}",
+            ttl=self._config.market_cache_latest_ttl,
+        )
+
+    # ---- corporate actions ---------------------------------------------------------------
+
+    async def corporate_actions(
+        self,
+        *,
+        symbols: list[str] | None = None,
+        types: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any] | None:
+        params: dict[str, Any] = {"limit": limit}
+        if symbols:
+            params["symbols"] = ",".join(sorted({s.upper() for s in symbols}))
+        if types:
+            params["types"] = ",".join(types)
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        cache_key = "ca:" + ":".join(
+            str(params.get(k, "")) for k in ("symbols", "types", "start", "end", "limit")
+        )
+        return await self._get_json(
+            host="data",
+            path=CORPORATE_ACTIONS_PATH,
+            params=params,
+            cache_key=cache_key,
+            ttl=self._config.market_cache_corporate_actions_ttl,
+        )
 
     # ---- historical bars (gap-fill + tool fallback) ---------------------------------
 

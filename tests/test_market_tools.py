@@ -180,3 +180,148 @@ async def test_tools_report_disabled_without_stock_stream(app):
     ]:
         out = await _call(mcp, tool, **kwargs)
         assert out["error"] == "stock_stream_disabled", tool
+
+
+# ---- REST market-context tools (respx-mocked) --------------------------------
+
+import httpx  # noqa: E402
+import respx  # noqa: E402
+
+from alpaca_news_mcp.market_client import MarketDataClient  # noqa: E402
+
+
+@pytest.fixture
+async def app_with_client(app):
+    client = MarketDataClient(app.config)
+    app.market_client = client
+    yield app
+    await client.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_market_movers_tool(app_with_client):
+    mcp = build_mcp()
+    respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers").mock(
+        return_value=httpx.Response(
+            200,
+            json={"gainers": [{"symbol": "UP", "percent_change": 15.2, "price": 12.5}],
+                  "losers": [{"symbol": "DN", "percent_change": -9.9, "price": 3.2}],
+                  "market_type": "stocks", "last_updated": "2026-07-02T14:00:00Z"},
+        )
+    )
+    out = await _call(mcp, "get_market_movers", top=5)
+    assert out["gainers"][0]["symbol"] == "UP"
+    assert out["losers"][0]["symbol"] == "DN"
+    over = await _call(mcp, "get_market_movers", top=999)
+    assert over["error"] == "limit_exceeded"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_most_active_stocks_tool(app_with_client):
+    mcp = build_mcp()
+    respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/most-actives").mock(
+        return_value=httpx.Response(
+            200, json={"most_actives": [{"symbol": "TSLA", "volume": 99}]}
+        )
+    )
+    out = await _call(mcp, "get_most_active_stocks", by="volume", top=5)
+    assert out["most_actives"][0]["symbol"] == "TSLA"
+    bad = await _call(mcp, "get_most_active_stocks", by="bogus")
+    assert bad["error"] == "invalid_by"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_stock_snapshots_tool(app_with_client):
+    mcp = build_mcp()
+    respx.get("https://data.alpaca.markets/v2/stocks/snapshots").mock(
+        return_value=httpx.Response(
+            200,
+            json={"AAPL": {"latestTrade": {"p": 190.5}, "latestQuote": {"bp": 190.4},
+                           "minuteBar": {"c": 190.5}, "dailyBar": {"c": 190.0},
+                           "prevDailyBar": {"c": 188.0}}},
+        )
+    )
+    out = await _call(mcp, "get_stock_snapshots", symbols=["aapl"])
+    snap = out["snapshots"]["AAPL"]
+    assert snap["latest_trade"]["p"] == 190.5
+    assert snap["prev_daily_bar"]["c"] == 188.0
+    assert (await _call(mcp, "get_stock_snapshots", symbols=[]))["error"] == "no_symbols"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_market_clock_and_calendar_tools(app_with_client):
+    mcp = build_mcp()
+    respx.get("https://paper-api.alpaca.markets/v2/clock").mock(
+        return_value=httpx.Response(
+            200, json={"timestamp": "t", "is_open": False, "next_open": "o", "next_close": "c"}
+        )
+    )
+    clock = await _call(mcp, "get_market_clock")
+    assert clock["is_open"] is False
+
+    respx.get("https://paper-api.alpaca.markets/v2/calendar").mock(
+        return_value=httpx.Response(
+            200, json=[{"date": "2026-07-06", "open": "09:30", "close": "16:00"}]
+        )
+    )
+    cal = await _call(mcp, "get_market_calendar")
+    assert cal["days"][0]["date"] == "2026-07-06"
+    bad = await _call(mcp, "get_market_calendar", start="2026-01-01", end="2026-12-31")
+    assert bad["error"] == "limit_exceeded"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_corporate_actions_tool(app_with_client):
+    mcp = build_mcp()
+    respx.get("https://data.alpaca.markets/v1beta1/corporate-actions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"corporate_actions": {"forward_splits": [{"symbol": "NVDA"}]},
+                  "next_page_token": None},
+        )
+    )
+    out = await _call(mcp, "get_corporate_actions", symbols=["NVDA"])
+    assert out["corporate_actions"]["forward_splits"][0]["symbol"] == "NVDA"
+    assert out["has_more"] is False
+    bad = await _call(mcp, "get_corporate_actions", start="2026-01-01", end="2026-12-31")
+    assert bad["error"] == "limit_exceeded"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_latest_market_data_rest_fallback(app_with_client):
+    mcp = build_mcp()
+    app_with_client.market_store.snapshots.update("AAPL", "trade", {"p": 190.5, "ts_us": 1})
+    respx.get("https://data.alpaca.markets/v2/stocks/trades/latest").mock(
+        return_value=httpx.Response(200, json={"trades": {"MSFT": {"p": 400.0}}})
+    )
+    respx.get("https://data.alpaca.markets/v2/stocks/quotes/latest").mock(
+        return_value=httpx.Response(200, json={"quotes": {"MSFT": {"bp": 399.9}}})
+    )
+    respx.get("https://data.alpaca.markets/v2/stocks/bars/latest").mock(
+        return_value=httpx.Response(200, json={"bars": {"MSFT": {"c": 400.1}}})
+    )
+    out = await _call(mcp, "get_latest_market_data", symbols=["AAPL", "MSFT"])
+    assert out["symbols"]["AAPL"]["trade"]["p"] == 190.5
+    assert out["symbols"]["MSFT"]["trade"]["p"] == 400.0
+    assert out["missing"] == []
+    assert out["source"] == "stream+rest"
+
+
+@pytest.mark.asyncio
+async def test_context_tools_without_client(app):
+    mcp = build_mcp()
+    app.market_client = None
+    for tool in ("get_market_movers", "get_most_active_stocks", "get_market_clock",
+                 "get_market_calendar"):
+        out = await _call(mcp, tool)
+        assert out["error"] == "market_client_unavailable", tool
+    out = await _call(mcp, "get_stock_snapshots", symbols=["A"])
+    assert out["error"] == "market_client_unavailable"
+    out = await _call(mcp, "get_corporate_actions")
+    assert out["error"] == "market_client_unavailable"

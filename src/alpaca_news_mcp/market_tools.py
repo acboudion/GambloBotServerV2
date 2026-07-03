@@ -21,6 +21,12 @@ MAX_WINDOW_ROWS = 1000
 MAX_BARS = 1000
 MAX_BARS_CURSOR = 2000
 MAX_STATUSES = 200
+MAX_MOVERS_TOP = 50
+MAX_ACTIVES_TOP = 100
+MAX_SNAPSHOT_SYMBOLS = 50
+MAX_CALENDAR_DAYS = 90
+MAX_CORPORATE_ACTIONS = 200
+CORPORATE_ACTIONS_MAX_RANGE_DAYS = 90
 
 VALID_INCLUDE = ("trade", "quote", "bar", "daily_bar", "status", "luld")
 VALID_TIMEFRAMES = ("1min", "1day")
@@ -46,6 +52,24 @@ def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
 
 def _stream_disabled() -> dict[str, Any]:
     return {"error": "stock_stream_disabled"}
+
+
+def _client_unavailable() -> dict[str, Any]:
+    return {"error": "market_client_unavailable"}
+
+
+def _upstream_error() -> dict[str, Any]:
+    return {"error": "alpaca_request_failed"}
+
+
+def _parse_date(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = dateparser.isoparse(value)
+    except (ValueError, TypeError):
+        return None
+    return dt.replace(tzinfo=dt.tzinfo or UTC)
 
 
 def _market_parts(app: AppState) -> tuple[Any, Any] | None:
@@ -160,10 +184,27 @@ def register(mcp: FastMCP) -> None:
                 if value is not None:
                     entry[key] = value
             out[sym_u] = entry
+        source = "stream"
+        # REST fallback for symbols outside the stream cache (trade/quote/bar
+        # only — statuses/LULD have no latest REST endpoint).
+        rest_kinds = {"trade": "trades", "quote": "quotes", "bar": "bars"}
+        wanted_rest = [k for k in include if k in rest_kinds]
+        if missing and app.market_client is not None and wanted_rest:
+            still_missing = set(missing)
+            for key in wanted_rest:
+                payload = await app.market_client.latest(rest_kinds[key], missing)
+                if not payload:
+                    continue
+                for sym_u, value in (payload.get(rest_kinds[key]) or {}).items():
+                    out.setdefault(sym_u.upper(), {})[key] = value
+                    still_missing.discard(sym_u.upper())
+            if len(still_missing) < len(missing):
+                source = "stream+rest"
+            missing = sorted(still_missing)
         return {
             "symbols": out,
             "missing": missing,
-            "source": "stream",
+            "source": source,
             "as_of": datetime.now(UTC).isoformat(),
         }
 
@@ -351,6 +392,182 @@ def register(mcp: FastMCP) -> None:
             "lulds": lulds,
         }
 
+    # ---- REST market context (works even with the stock stream disabled) ---------------
+
+    @mcp.tool(
+        description=(
+            "Top market gainers and losers vs previous close (Alpaca screener, "
+            "real-time SIP). A live 'what's moving today' view."
+        )
+    )
+    async def get_market_movers(top: int = 10) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        if top > MAX_MOVERS_TOP:
+            return _limit_exceeded(MAX_MOVERS_TOP, top)
+        payload = await app.market_client.movers(top=max(1, top))
+        if payload is None:
+            return _upstream_error()
+        return {
+            "gainers": payload.get("gainers") or [],
+            "losers": payload.get("losers") or [],
+            "market_type": payload.get("market_type"),
+            "last_updated": payload.get("last_updated"),
+        }
+
+    @mcp.tool(
+        description=(
+            "Most active stocks by volume or trade count (Alpaca screener). "
+            "by: volume|trades."
+        )
+    )
+    async def get_most_active_stocks(
+        by: str = "volume", top: int = 10
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        if by not in ("volume", "trades"):
+            return {"error": "invalid_by", "valid": ["volume", "trades"]}
+        if top > MAX_ACTIVES_TOP:
+            return _limit_exceeded(MAX_ACTIVES_TOP, top)
+        payload = await app.market_client.most_actives(by=by, top=max(1, top))
+        if payload is None:
+            return _upstream_error()
+        return {
+            "by": by,
+            "most_actives": payload.get("most_actives") or [],
+            "last_updated": payload.get("last_updated"),
+        }
+
+    @mcp.tool(
+        description=(
+            "Full snapshots (latest trade, latest quote, minute bar, daily bar, "
+            "previous daily bar) per symbol via REST — works for any symbol, "
+            "watchlisted or not. One call = complete per-symbol context."
+        )
+    )
+    async def get_stock_snapshots(symbols: list[str]) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        if not symbols:
+            return {"error": "no_symbols"}
+        if len(symbols) > MAX_SNAPSHOT_SYMBOLS:
+            return _limit_exceeded(MAX_SNAPSHOT_SYMBOLS, len(symbols))
+        payload = await app.market_client.snapshots(symbols)
+        if payload is None:
+            return _upstream_error()
+        out: dict[str, Any] = {}
+        for sym, snap in payload.items():
+            if not isinstance(snap, dict):
+                continue
+            out[sym.upper()] = {
+                "latest_trade": snap.get("latestTrade"),
+                "latest_quote": snap.get("latestQuote"),
+                "minute_bar": snap.get("minuteBar"),
+                "daily_bar": snap.get("dailyBar"),
+                "prev_daily_bar": snap.get("prevDailyBar"),
+            }
+        return {"snapshots": out, "as_of": datetime.now(UTC).isoformat()}
+
+    @mcp.tool(
+        description=(
+            "Market clock: is the market open now, and the next open/close "
+            "timestamps. Cached ~15s."
+        )
+    )
+    async def get_market_clock() -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        payload = await app.market_client.clock()
+        if payload is None:
+            return _upstream_error()
+        return {
+            "timestamp": payload.get("timestamp"),
+            "is_open": payload.get("is_open"),
+            "next_open": payload.get("next_open"),
+            "next_close": payload.get("next_close"),
+        }
+
+    @mcp.tool(
+        description=(
+            "Market calendar (trading days with open/close, incl. early closes). "
+            "start/end: YYYY-MM-DD, range <= 90 days; defaults to the next 14 days."
+        )
+    )
+    async def get_market_calendar(
+        start: str | None = None, end: str | None = None
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        start_dt = _parse_date(start) or datetime.now(UTC)
+        end_dt = _parse_date(end) or (start_dt + timedelta(days=14))
+        if end_dt < start_dt:
+            return {"error": "invalid_range", "reason": "end before start"}
+        if (end_dt - start_dt).days > MAX_CALENDAR_DAYS:
+            return _limit_exceeded(MAX_CALENDAR_DAYS, (end_dt - start_dt).days)
+        days = await app.market_client.calendar(
+            start=start_dt.date().isoformat(), end=end_dt.date().isoformat()
+        )
+        if days is None:
+            return _upstream_error()
+        return {
+            "start": start_dt.date().isoformat(),
+            "end": end_dt.date().isoformat(),
+            "days": days,
+        }
+
+    @mcp.tool(
+        description=(
+            "Corporate actions (splits, dividends, mergers, spinoffs...) by "
+            "symbol/type/date. start/end: YYYY-MM-DD, range <= 90 days; "
+            "defaults to -7d..+30d. Use to avoid surprises like splits on held "
+            "symbols."
+        )
+    )
+    async def get_corporate_actions(
+        symbols: list[str] | None = None,
+        types: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        if limit > MAX_CORPORATE_ACTIONS:
+            return _limit_exceeded(MAX_CORPORATE_ACTIONS, limit)
+        if symbols and len(symbols) > MAX_SNAPSHOT_SYMBOLS:
+            return _limit_exceeded(MAX_SNAPSHOT_SYMBOLS, len(symbols))
+        now = datetime.now(UTC)
+        start_dt = _parse_date(start) or (now - timedelta(days=7))
+        end_dt = _parse_date(end) or (now + timedelta(days=30))
+        if end_dt < start_dt:
+            return {"error": "invalid_range", "reason": "end before start"}
+        if (end_dt - start_dt).days > CORPORATE_ACTIONS_MAX_RANGE_DAYS:
+            return _limit_exceeded(
+                CORPORATE_ACTIONS_MAX_RANGE_DAYS, (end_dt - start_dt).days
+            )
+        payload = await app.market_client.corporate_actions(
+            symbols=symbols,
+            types=types,
+            start=start_dt.date().isoformat(),
+            end=end_dt.date().isoformat(),
+            limit=max(1, limit),
+        )
+        if payload is None:
+            return _upstream_error()
+        return {
+            "start": start_dt.date().isoformat(),
+            "end": end_dt.date().isoformat(),
+            "corporate_actions": payload.get("corporate_actions") or {},
+            "has_more": bool(payload.get("next_page_token")),
+        }
+
 
 def register_resources(mcp: FastMCP) -> None:
     import json
@@ -382,6 +599,16 @@ def register_resources(mcp: FastMCP) -> None:
         if snap is None:
             return json.dumps({"error": "not_in_stream_cache", "symbol": symbol.upper()})
         return json.dumps({"symbol": symbol.upper(), **snap}, default=str)
+
+    @mcp.resource("alpaca-market://clock", mime_type="application/json")
+    async def clock_resource() -> str:
+        app = get_app_state()
+        if app.market_client is None:
+            return json.dumps(_client_unavailable())
+        payload = await app.market_client.clock()
+        if payload is None:
+            return json.dumps(_upstream_error())
+        return json.dumps(payload, default=str)
 
     @mcp.resource("alpaca-market://halts", mime_type="application/json")
     async def halts_resource() -> str:
