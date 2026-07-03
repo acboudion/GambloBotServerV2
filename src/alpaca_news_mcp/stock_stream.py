@@ -249,12 +249,17 @@ class StockStreamWorker(BaseStreamWorker):
         return max(1, int(self._config.stock_queue_maxsize * 0.75))
 
     async def on_authenticated(self, ws: Any) -> None:
+        # New session: the previous session's ack no longer describes what
+        # Alpaca is delivering. Clear it so health/tools never report symbols
+        # the current connection hasn't acknowledged (trust acks, not requests).
+        self._acknowledged = None
         # Replay the full desired subscription; the ack arrives via the
         # receive loop (handle_item) so we don't block here.
         await self._send_subscription(ws, "subscribe", sorted(self._watchlist))
         self._state.update_health(
             self.stream_name,
             requested_subscription={c: sorted(self._watchlist) for c in self._channels},
+            acknowledged_subscription=None,
             subscription_mode="watchlist",
         )
 

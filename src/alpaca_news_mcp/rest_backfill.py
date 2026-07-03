@@ -23,6 +23,11 @@ REST_NEWS_PATH = "/v1beta1/news"
 IngestStatus = Literal["new", "updated", "duplicate", "failed"]
 
 
+class BackfillError(RuntimeError):
+    """A backfill that must not be treated as complete (used by reconnect
+    gap-fills so BaseStreamWorker's retry/alert path engages)."""
+
+
 def _empty_counts(*, skipped: int = 0) -> dict[str, int]:
     """Canonical zero-shape so callers can destructure regardless of branch."""
     out: dict[str, int] = {
@@ -101,16 +106,27 @@ class RestBackfillWorker:
                 minutes=self._config.backfill_lookback_minutes
             )
         adjusted = since_dt - timedelta(seconds=self._config.rest_backfill_overlap_seconds)
-        return await self._run(start_iso=adjusted.isoformat(), reason="gap_fill")
+        # Gap-fill recovers a disconnect window: a partial or failed run must
+        # raise (BackfillError) so the caller's retry/alert path engages —
+        # returning partial counts here would silently drop articles.
+        return await self._run(
+            start_iso=adjusted.isoformat(), reason="gap_fill", raise_on_failure=True
+        )
 
     async def manual(self, minutes: int) -> dict[str, int]:
         start = datetime.now(UTC) - timedelta(minutes=minutes)
         return await self._run(start_iso=start.isoformat(), reason="manual")
 
-    async def _run(self, *, start_iso: str, reason: str) -> dict[str, int]:
+    async def _run(
+        self, *, start_iso: str, reason: str, raise_on_failure: bool = False
+    ) -> dict[str, int]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
+            if raise_on_failure:
+                # The concurrent run may not cover this gap window — retry.
+                raise BackfillError("backfill already running; gap window not covered")
             return _empty_counts(skipped=1)
+        failure: str | None = None
         async with self._run_lock:
             client = await self._ensure_client()
             params: dict[str, Any] = {
@@ -141,6 +157,7 @@ class RestBackfillWorker:
                     resp = await client.get(REST_NEWS_PATH, params=params)
                 except httpx.HTTPError as e:
                     log.warning("rest_backfill request failed: %s", e)
+                    failure = f"request failed: {e}"
                     break
 
                 if resp.status_code == 429:
@@ -152,6 +169,7 @@ class RestBackfillWorker:
                             reason,
                         )
                         self._state.update_health(last_error="rest 429 retry budget exhausted")
+                        failure = "429 retry budget exhausted"
                         break
                     retry_after = float(resp.headers.get("Retry-After", "0") or 0)
                     wait = retry_after if retry_after > 0 else backoff
@@ -169,6 +187,7 @@ class RestBackfillWorker:
                 if resp.status_code == 403:
                     log.warning("rest_backfill 403 entitlement_error reason=%s", reason)
                     self._state.update_health(entitlement_error=True, last_error="rest 403 forbidden")
+                    failure = "403 entitlement error"
                     break
                 if resp.status_code >= 400:
                     log.warning(
@@ -177,6 +196,7 @@ class RestBackfillWorker:
                         reason,
                         resp.text[:200],
                     )
+                    failure = f"http {resp.status_code}"
                     break
 
                 data = resp.json()
@@ -188,6 +208,9 @@ class RestBackfillWorker:
                 backoff = max(1.0, backoff / 2)
                 if not page_token:
                     break
+
+            if raise_on_failure and failure is not None:
+                raise BackfillError(f"gap-fill incomplete ({failure})")
 
             ingested = counts["new"] + counts["updated"] + counts["duplicate"]
             log.info(

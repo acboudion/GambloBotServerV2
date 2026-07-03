@@ -426,3 +426,29 @@ async def test_bar_gap_fill_failure_reaches_retry_alerting(wired, monkeypatch):
     assert state.snapshot_health("stocks").gap_fill_failures == 3
     stored = await store.get_alerts(minutes=5, categories=["gap_fill_failure"], limit=10)
     assert any(a.severity == "critical" for a in stored)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_clears_stale_subscription_ack(wired):
+    """A new session must not report the previous session's acknowledgement —
+    trust acks, not requests."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    # Simulate a previous session's ack.
+    worker._acknowledged = {"trades": ["AAPL", "TSLA"]}
+    state.update_health("stocks", acknowledged_subscription={"trades": ["AAPL", "TSLA"]})
+
+    sent: list = []
+
+    class FakeWS:
+        async def send(self, payload) -> None:
+            sent.append(payload)
+
+    await worker.on_authenticated(FakeWS())
+    assert worker.acknowledged_subscription() is None
+    assert state.snapshot_health("stocks").acknowledged_subscription is None
+    assert len(sent) == 1  # fresh subscribe was replayed
+
+    # Ack from the new session repopulates it.
+    await worker.handle_item(FakeWS(), {"T": "subscription", "trades": ["AAPL", "TSLA"]})
+    assert worker.acknowledged_subscription() == {"trades": ["AAPL", "TSLA"]}

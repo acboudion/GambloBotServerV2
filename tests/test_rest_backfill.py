@@ -276,3 +276,38 @@ async def test_rest_then_ws_versioning(wired):
     assert res.version_inserted is True
     versions = await store.get_versions(99)
     assert {v.headline for v in versions} == {"v1", "v2"}
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_on_failure_so_retry_path_engages(wired):
+    """Reconnect gap-fill must NOT swallow REST failures: partial counts on
+    403/429/HTTP errors would make BaseStreamWorker treat the fill as done and
+    silently drop the disconnect window."""
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        with pytest.raises(BackfillError, match="403"):
+            await worker.gap_fill()
+
+    # Startup keeps its best-effort contract (app_setup catches and continues).
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        result = await worker.backfill_startup()
+    assert result["ingested"] == 0
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_another_backfill_holds_the_lock(wired):
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    await worker._run_lock.acquire()
+    try:
+        with pytest.raises(BackfillError, match="already running"):
+            await worker.gap_fill()
+    finally:
+        worker._run_lock.release()
