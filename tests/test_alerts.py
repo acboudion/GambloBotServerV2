@@ -342,3 +342,36 @@ def test_high_latency_alerts_respect_rate_limit():
     again = engine.evaluate_article(slow_article(2), interest_symbols=set())
     assert not any(a.category == "high_latency" for a in again)
     assert engine.suppressed_alerts >= 1
+
+
+def test_pending_charges_enforce_quota_within_a_batch():
+    """Provisional (pending) charges must count against the limiter for later
+    evaluations in the same open batch, then commit or discard atomically."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    first = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1, headline="Analyst upgrade"), interest_symbols=set()
+        )
+        if a.category == "analyst_keyword"
+    ]
+    engine.count_emission(first[0], pending=True)
+    # Same batch, second distinct article: suppressed by the pending charge.
+    again = engine.evaluate_article(
+        _mk_article(id=2, headline="Analyst upgrade again"), interest_symbols=set()
+    )
+    assert not any(a.category == "analyst_keyword" for a in again)
+    # Rollback: the pending charge disappears and the alert flows again.
+    engine.discard_pending()
+    ok = engine.evaluate_article(
+        _mk_article(id=3, headline="Analyst upgrade back"), interest_symbols=set()
+    )
+    assert any(a.category == "analyst_keyword" for a in ok)
+    # Commit: the charge becomes durable.
+    engine.count_emission(
+        next(a for a in ok if a.category == "analyst_keyword"), pending=True
+    )
+    engine.commit_pending()
+    after = engine.evaluate_article(
+        _mk_article(id=4, headline="Analyst upgrade after"), interest_symbols=set()
+    )
+    assert not any(a.category == "analyst_keyword" for a in after)

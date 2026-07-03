@@ -624,3 +624,15 @@ async def test_oversized_startup_watchlist_is_capped(wired):
     await store.set_status("stock_watchlist", {"symbols": big})
     await worker.restore_watchlist()
     assert len(worker.watchlist()) == 100
+
+
+@pytest.mark.asyncio
+async def test_watchdog_inert_with_empty_watchlist(wired):
+    """An intentionally cleared watchlist means silence is expected — the
+    idle watchdog must not reconnect all day during market hours."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts,
+                     market_client=_FakeMarketClient())
+    assert await worker.watchdog_should_fire() is True  # symbols + open market
+    await worker.update_watchlist([], mode="replace")
+    assert await worker.watchdog_should_fire() is False

@@ -278,6 +278,10 @@ class StockStreamWorker(BaseStreamWorker):
         """Only treat silence as a stall while the market is open. A closed
         market (or an unavailable clock) keeps the watchdog inert so we don't
         churn reconnects all night."""
+        if not self._watchlist:
+            # An intentionally cleared watchlist means silence is EXPECTED —
+            # reconnecting on the idle timer all day would just churn.
+            return False
         if self._market_client is None:
             return False
         try:

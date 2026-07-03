@@ -152,6 +152,9 @@ class AlertEngine:
         self._recent_market_alerts: dict[tuple[str, str], float] = {}
         # (symbols-key, category) -> deque of monotonic emit times (rate limit)
         self._emit_times: dict[tuple[str, str], deque[float]] = {}
+        # Provisional charges from an open batch transaction (see
+        # count_emission(pending=True) / commit_pending / discard_pending).
+        self._pending_emit: dict[tuple[str, str], int] = {}
 
         keywords = {group: list(phrases) for group, phrases in KEYWORDS.items()}
         critical = set(CRITICAL_PHRASES)
@@ -201,10 +204,10 @@ class AlertEngine:
         self, symbols: list[str], category: str, severity: Severity
     ) -> bool:
         """Per-(symbol, category) hourly cap check; suppress when ANY mentioned
-        symbol is over quota. Critical alerts exempt. Checks only — quota is
-        charged via count_emission() once the alert is actually inserted, so
-        store-level dedup (same content hash) doesn't burn quota and suppress
-        later distinct alerts."""
+        symbol is over quota (committed + pending charges). Critical alerts
+        exempt. Checks only — quota is charged via count_emission() once the
+        alert is actually inserted, so store-level dedup (same content hash)
+        doesn't burn quota and suppress later distinct alerts."""
         if self.rate_limit_per_symbol_hour <= 0 or severity == "critical":
             return False
         now = time.monotonic()
@@ -212,19 +215,41 @@ class AlertEngine:
             times = self._emit_times.setdefault(key, deque())
             while times and now - times[0] > 3600:
                 times.popleft()
-            if len(times) >= self.rate_limit_per_symbol_hour:
+            used = len(times) + self._pending_emit.get(key, 0)
+            if used >= self.rate_limit_per_symbol_hour:
                 self.suppressed_alerts += 1
                 return True
         return False
 
-    def count_emission(self, alert: Alert) -> None:
+    def count_emission(self, alert: Alert, *, pending: bool = False) -> None:
         """Charge the hourly quota for an alert that was actually inserted.
-        Persisters call this after Store.record_alert returns True."""
+        Persisters call this after Store.record_alert returns True.
+
+        pending=True records a provisional charge (used by the batched news
+        persister while its transaction is still open): it counts against
+        _rate_limited() for later articles in the same batch, and is either
+        promoted by commit_pending() once the batch commits or dropped by
+        discard_pending() on rollback."""
         if self.rate_limit_per_symbol_hour <= 0 or alert.severity == "critical":
             return
         now = time.monotonic()
         for key in self._quota_keys(alert.symbols, alert.category):
-            self._emit_times.setdefault(key, deque()).append(now)
+            if pending:
+                self._pending_emit[key] = self._pending_emit.get(key, 0) + 1
+            else:
+                self._emit_times.setdefault(key, deque()).append(now)
+
+    def commit_pending(self) -> None:
+        """Promote provisional charges to committed quota (batch committed)."""
+        now = time.monotonic()
+        for key, count in self._pending_emit.items():
+            times = self._emit_times.setdefault(key, deque())
+            times.extend(now for _ in range(count))
+        self._pending_emit.clear()
+
+    def discard_pending(self) -> None:
+        """Drop provisional charges (batch rolled back — nothing was emitted)."""
+        self._pending_emit.clear()
 
     def _market_alert_deduped(self, symbol: str, category: str) -> bool:
         """True when an identical (symbol, category) alert fired recently."""
