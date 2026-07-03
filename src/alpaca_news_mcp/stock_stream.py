@@ -579,6 +579,12 @@ class StockStreamWorker(BaseStreamWorker):
             symbol = str(item.get("S") or "").upper()
             if slot is None or not symbol:
                 continue
+            if symbol not in self._watchlist:
+                # Queued/in-flight frames for a symbol just removed from the
+                # watchlist can arrive after update_watchlist evicted it —
+                # repopulating the cache would resurrect source="stream" data
+                # for an unsubscribed symbol indefinitely.
+                continue
             ts_us = _to_epoch_us(item.get("t"))
             if ts_us is None:
                 # Frames without a parseable timestamp aren't persisted as

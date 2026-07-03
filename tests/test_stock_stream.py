@@ -689,3 +689,22 @@ async def test_priceless_trade_does_not_clobber_snapshot(wired):
     bad["t"] = "2026-04-28T15:35:00Z"  # newer than the good trade
     await worker.persist_batch([("t", bad)])
     assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5
+
+
+@pytest.mark.asyncio
+async def test_inflight_frames_for_removed_symbol_do_not_repopulate_cache(wired):
+    """Queued/in-flight frames arriving after a symbol was removed from the
+    watchlist must not repopulate the evicted snapshot — get_latest_market_data
+    would serve source="stream" for an unsubscribed symbol indefinitely."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    await worker.persist_batch([("t", _trade(price=190.5))])
+    assert market_store.snapshots.get("AAPL") is not None
+    await worker.update_watchlist(["AAPL"], mode="remove")
+    assert market_store.snapshots.get("AAPL") is None
+    # A frame that was already queued lands after the eviction.
+    await worker.persist_batch([("t", _trade(price=191.0, ts="2026-04-28T15:36:00Z"))])
+    assert market_store.snapshots.get("AAPL") is None
+    # Still-subscribed symbols keep updating.
+    await worker.persist_batch([("t", _trade(symbol="TSLA", price=250.0))])
+    assert market_store.snapshots.get("TSLA")["trade"]["p"] == 250.0
