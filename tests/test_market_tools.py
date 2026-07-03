@@ -371,3 +371,15 @@ async def test_invalid_dates_return_structured_errors(app_with_client):
     assert ca == {"error": "invalid_date", "field": "end", "value": "not-a-date"}
     bars = await _call(mcp, "get_stock_bars", symbol="AAPL", start="garbage")
     assert bars == {"error": "invalid_date", "field": "start", "value": "garbage"}
+
+
+@pytest.mark.asyncio
+async def test_get_bars_since_caps_symbol_count(app):
+    """symbols feeds a per-symbol SQL placeholder list — reject oversized
+    lists structurally instead of hitting SQLite's variable limit."""
+    mcp = build_mcp()
+    out = await _call(
+        mcp, "get_bars_since", symbols=[f"S{i}" for i in range(51)]
+    )
+    assert out["error"] == "limit_exceeded"
+    assert out["max_allowed"] == 50

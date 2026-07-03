@@ -138,3 +138,28 @@ def test_snapshot_cache_keeps_newest():
     cache.update("AAPL", "quote", {"bp": 99.5, "ts_us": 3000})
     assert set(cache.get("AAPL").keys()) == {"trade", "quote"}
     assert cache.symbols() == ["AAPL"]
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_rolls_back(market_store):
+    """A mid-batch failure must roll back everything already written in the
+    transaction — a later successful write must not commit partial rows."""
+    # Trades write fine, but a malformed LULD row (too few columns) fails
+    # after the trades executemany succeeded.
+    import sqlite3
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        await market_store.persist_stream_batch(
+            trades=[("AAPL", 1_700_000_000_000_000, 190.0, 100, "V", "@", "C", 1)],
+            lulds=[("AAPL",)],
+        )
+    # A later good write commits only itself.
+    await market_store.persist_stream_batch(
+        quotes=[("AAPL", 1_700_000_000_000_001, 189.9, 2, "V", 190.1, 3, "V", "R", "C")],
+    )
+    trades = await market_store.trades_window(
+        "AAPL", since_us=0, limit=10
+    )
+    assert trades == []  # the rolled-back trade never landed
+    quotes = await market_store.quotes_window("AAPL", since_us=0, limit=10)
+    assert len(quotes) == 1

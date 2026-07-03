@@ -362,6 +362,10 @@ def register(mcp: FastMCP) -> None:
         _, market_store = parts
         if limit > MAX_BARS_CURSOR:
             return _limit_exceeded(MAX_BARS_CURSOR, limit)
+        # One SQL placeholder per symbol — an unbounded list could exceed
+        # SQLite's variable limit and raise instead of erroring structurally.
+        if symbols and len(symbols) > MAX_LATEST_SYMBOLS:
+            return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
         if timeframe is not None and timeframe not in VALID_TIMEFRAMES:
             return {"error": "invalid_timeframe", "valid": list(VALID_TIMEFRAMES)}
         rows, next_cursor, has_more = await market_store.bars_since(

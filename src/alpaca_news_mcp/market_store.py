@@ -136,56 +136,63 @@ class MarketStore:
         """
         now = _utcnow_iso()
         async with self._write_lock:
-            if trades:
-                await self.conn.executemany(
-                    "INSERT INTO stock_trades "
-                    "(symbol, ts_us, price, size, exchange, conditions, tape, trade_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    trades,
-                )
-            if quotes:
-                await self.conn.executemany(
-                    "INSERT INTO stock_quotes "
-                    "(symbol, ts_us, bid_price, bid_size, bid_exchange, "
-                    " ask_price, ask_size, ask_exchange, conditions, tape) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    quotes,
-                )
-            if bars:
-                rows = [(*bar, now, self._allocate_bar_seq()) for bar in bars]
-                await self.conn.executemany(
-                    "INSERT INTO stock_bars "
-                    "(symbol, timeframe, ts, open, high, low, close, volume, "
-                    " trade_count, vwap, updated_at, seq) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET "
-                    "  open = excluded.open, high = excluded.high, low = excluded.low, "
-                    "  close = excluded.close, volume = excluded.volume, "
-                    "  trade_count = excluded.trade_count, vwap = excluded.vwap, "
-                    "  updated_at = excluded.updated_at, seq = excluded.seq",
-                    rows,
-                )
-            if statuses:
-                await self.conn.executemany(
-                    "INSERT INTO stock_statuses "
-                    "(symbol, ts_us, status_code, status_msg, reason_code, reason_msg, tape) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    statuses,
-                )
-            if lulds:
-                await self.conn.executemany(
-                    "INSERT INTO stock_lulds "
-                    "(symbol, ts_us, limit_up, limit_down, indicator, tape) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    lulds,
-                )
-            if raw_events:
-                await self.conn.executemany(
-                    "INSERT INTO market_raw_events (received_at, message_type, raw_json) "
-                    "VALUES (?, ?, ?)",
-                    [(now, mt, rj) for mt, rj in raw_events],
-                )
-            await self.conn.commit()
+            # All-or-nothing: a failure mid-batch (or at commit) must roll
+            # back, or a later successful write would commit earlier partial
+            # rows without their matching snapshots/alerts.
+            try:
+                if trades:
+                    await self.conn.executemany(
+                        "INSERT INTO stock_trades "
+                        "(symbol, ts_us, price, size, exchange, conditions, tape, trade_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        trades,
+                    )
+                if quotes:
+                    await self.conn.executemany(
+                        "INSERT INTO stock_quotes "
+                        "(symbol, ts_us, bid_price, bid_size, bid_exchange, "
+                        " ask_price, ask_size, ask_exchange, conditions, tape) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        quotes,
+                    )
+                if bars:
+                    rows = [(*bar, now, self._allocate_bar_seq()) for bar in bars]
+                    await self.conn.executemany(
+                        "INSERT INTO stock_bars "
+                        "(symbol, timeframe, ts, open, high, low, close, volume, "
+                        " trade_count, vwap, updated_at, seq) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(symbol, timeframe, ts) DO UPDATE SET "
+                        "  open = excluded.open, high = excluded.high, low = excluded.low, "
+                        "  close = excluded.close, volume = excluded.volume, "
+                        "  trade_count = excluded.trade_count, vwap = excluded.vwap, "
+                        "  updated_at = excluded.updated_at, seq = excluded.seq",
+                        rows,
+                    )
+                if statuses:
+                    await self.conn.executemany(
+                        "INSERT INTO stock_statuses "
+                        "(symbol, ts_us, status_code, status_msg, reason_code, reason_msg, tape) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        statuses,
+                    )
+                if lulds:
+                    await self.conn.executemany(
+                        "INSERT INTO stock_lulds "
+                        "(symbol, ts_us, limit_up, limit_down, indicator, tape) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        lulds,
+                    )
+                if raw_events:
+                    await self.conn.executemany(
+                        "INSERT INTO market_raw_events (received_at, message_type, raw_json) "
+                        "VALUES (?, ?, ?)",
+                        [(now, mt, rj) for mt, rj in raw_events],
+                    )
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
 
     def _allocate_bar_seq(self) -> int:
         seq = self._next_bar_seq
