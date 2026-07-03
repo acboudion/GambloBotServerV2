@@ -321,3 +321,21 @@ async def test_get_news_for_symbols_caps_symbol_count(app):
     assert out["max_allowed"] == 50
     ok = await _call(mcp, "get_news_for_symbols", symbols=["AAPL"])
     assert "symbols" in ok
+
+
+@pytest.mark.asyncio
+async def test_symbol_filters_capped_across_news_tools(app):
+    """Optional symbol filters feed per-symbol SQL placeholders — every
+    news tool must reject oversized lists structurally."""
+    mcp = build_mcp()
+    big = [f"S{i}" for i in range(51)]
+    for tool, kwargs in [
+        ("get_recent_news", {"symbols": big}),
+        ("get_news_since", {"symbols": big}),
+        ("search_news", {"query": "x", "symbols": big}),
+        ("get_breaking_news_digest", {"symbols": big}),
+        ("get_news_alerts", {"symbols": big}),
+    ]:
+        out = await _call(mcp, tool, **kwargs)
+        assert out["error"] == "limit_exceeded", tool
+        assert out["max_allowed"] == 50, tool

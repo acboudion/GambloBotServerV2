@@ -36,6 +36,15 @@ def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
     }
 
 
+def _symbols_over_cap(symbols: list[str] | None) -> dict[str, Any] | None:
+    """Optional symbol filters become one SQL placeholder each — reject
+    oversized lists structurally instead of exceeding SQLite's variable
+    limit and raising out of the tool."""
+    if symbols and len(symbols) > MAX_SYMBOLS_PER_LOOKUP:
+        return _limit_exceeded(MAX_SYMBOLS_PER_LOOKUP, len(symbols))
+    return None
+
+
 def _invalid_fields(fields: str) -> dict[str, Any]:
     return {"error": "invalid_fields", "fields": fields, "valid": list(VALID_FIELD_MODES)}
 
@@ -122,6 +131,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if limit > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit)
+        if (over := _symbols_over_cap(symbols)) is not None:
+            return over
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
         limit = min(max(1, limit), MAX_ARTICLES_DEFAULT if limit <= 0 else limit)
@@ -160,6 +171,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if limit > MAX_CURSOR_ITEMS:
             return _limit_exceeded(MAX_CURSOR_ITEMS, limit)
+        if (over := _symbols_over_cap(symbols)) is not None:
+            return over
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
         limit = min(max(1, limit), MAX_CURSOR_ITEMS)
@@ -246,6 +259,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if limit > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit)
+        if (over := _symbols_over_cap(symbols)) is not None:
+            return over
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
         if not query or not query.strip():
@@ -308,6 +323,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if max_articles > MAX_DIGEST_ARTICLES:
             return _limit_exceeded(MAX_DIGEST_ARTICLES, max_articles)
+        if (over := _symbols_over_cap(symbols)) is not None:
+            return over
         # Clamp to >= 1: SQLite treats LIMIT <= 0 as "no limit", and a negative
         # slice (filtered[:-N]) would silently drop items rather than bound them.
         max_articles = max(1, min(max_articles, MAX_DIGEST_ARTICLES))
@@ -377,6 +394,8 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if limit > 500:
             return _limit_exceeded(500, limit)
+        if (over := _symbols_over_cap(symbols)) is not None:
+            return over
         app = get_app_state()
         alerts = await app.store.get_alerts(
             minutes=minutes,

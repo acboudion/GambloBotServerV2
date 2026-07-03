@@ -675,3 +675,17 @@ async def test_trade_without_price_routes_to_raw_not_tick_series(wired):
     # A real trade still lands.
     await worker.persist_batch([("t", _trade())])
     assert len(await market_store.trades_window("AAPL", since_us=0, limit=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_priceless_trade_does_not_clobber_snapshot(wired):
+    """A trade rejected by the tick store (no numeric price) must not become
+    the cached latest trade either."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    await worker.persist_batch([("t", _trade(price=190.5))])
+    bad = _trade()
+    bad["p"] = None
+    bad["t"] = "2026-04-28T15:35:00Z"  # newer than the good trade
+    await worker.persist_batch([("t", bad)])
+    assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5

@@ -586,6 +586,12 @@ class StockStreamWorker(BaseStreamWorker):
                 # not overwrite a good latest snapshot either: the cache can't
                 # order a None timestamp, so a malformed frame would win.
                 continue
+            if kind == "t":
+                price = item.get("p")
+                if not isinstance(price, (int, float)) or isinstance(price, bool):
+                    # Same rule as the tick store: a trade without a real
+                    # numeric price must not become the cached latest trade.
+                    continue
             snap = {
                 k: v for k, v in item.items() if k not in ("T", "S")
             }
