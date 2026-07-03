@@ -188,7 +188,7 @@ class StockStreamWorker(BaseStreamWorker):
         message: dict[str, Any] = {"action": action}
         for channel in self._channels:
             message[channel] = symbols
-        await ws.send(orjson.dumps(message).decode("utf-8"))
+        await ws.send(self.encode_message(message))
 
     # ---- BaseStreamWorker hooks ----------------------------------------------------
 
@@ -212,6 +212,14 @@ class StockStreamWorker(BaseStreamWorker):
                 return [data]
             return []
         return super().decode_frame(raw)
+
+    def encode_message(self, message: dict[str, Any]) -> str | bytes:
+        # On a msgpack-negotiated connection Alpaca expects outbound control
+        # frames (auth/subscribe/unsubscribe) to be msgpack too — JSON text
+        # frames are rejected with 400 invalid syntax.
+        if self._config.stock_stream_codec == "msgpack":
+            return msgpack.packb(message)
+        return super().encode_message(message)
 
     def idle_reconnect_seconds(self) -> float:
         return float(self._config.stock_idle_reconnect_seconds)

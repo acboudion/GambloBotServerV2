@@ -101,6 +101,42 @@ async def test_msgpack_and_json_decoding(wired):
 
 
 @pytest.mark.asyncio
+async def test_outbound_control_frames_match_negotiated_codec(wired):
+    """On a msgpack-negotiated connection, auth/subscribe/unsubscribe must be
+    msgpack-encoded bytes (Alpaca rejects JSON text frames with 400); in JSON
+    mode they must stay text."""
+    cfg, store, market_store, state, alerts = wired
+    assert cfg.stock_stream_codec == "msgpack"
+    worker = _worker(cfg, store, market_store, state, alerts)
+
+    encoded = worker.encode_message({"action": "auth", "key": "k", "secret": "s"})
+    assert isinstance(encoded, bytes)
+    assert msgpack.unpackb(encoded, raw=False) == {
+        "action": "auth", "key": "k", "secret": "s",
+    }
+
+    sent: list = []
+
+    class FakeWS:
+        async def send(self, payload) -> None:
+            sent.append(payload)
+
+    await worker._send_subscription(FakeWS(), "subscribe", ["AAPL"])
+    assert isinstance(sent[0], bytes)
+    assert msgpack.unpackb(sent[0], raw=False)["action"] == "subscribe"
+
+    StockStreamWorker.reset_singleton()
+    cfg_json = replace(cfg, stock_stream_codec="json")
+    worker_json = _worker(cfg_json, store, market_store, state, alerts)
+    encoded_json = worker_json.encode_message({"action": "auth"})
+    assert isinstance(encoded_json, str)
+    sent.clear()
+    await worker_json._send_subscription(FakeWS(), "subscribe", ["AAPL"])
+    assert isinstance(sent[0], str)
+    assert orjson.loads(sent[0])["action"] == "subscribe"
+
+
+@pytest.mark.asyncio
 async def test_persist_batch_writes_all_types_and_snapshots(wired):
     cfg, store, market_store, state, alerts = wired
     worker = _worker(cfg, store, market_store, state, alerts)
@@ -206,6 +242,13 @@ async def test_update_watchlist_modes_and_persistence(wired):
     assert worker2.watchlist() == ["QQQ", "SPY"]
 
 
+def _decode_control(payload) -> dict:
+    """Outbound control frames are msgpack bytes in msgpack mode, JSON text otherwise."""
+    if isinstance(payload, bytes):
+        return msgpack.unpackb(payload, raw=False)
+    return orjson.loads(payload)
+
+
 @pytest.mark.asyncio
 async def test_update_watchlist_sends_deltas_when_connected(wired):
     cfg, store, market_store, state, alerts = wired
@@ -213,8 +256,8 @@ async def test_update_watchlist_sends_deltas_when_connected(wired):
     sent: list[dict] = []
 
     class FakeWS:
-        async def send(self, payload: str) -> None:
-            sent.append(orjson.loads(payload))
+        async def send(self, payload) -> None:
+            sent.append(_decode_control(payload))
 
     worker._ws = FakeWS()
     out = await worker.update_watchlist(["NVDA"], mode="add")

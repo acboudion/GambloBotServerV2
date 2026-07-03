@@ -117,6 +117,13 @@ class BaseStreamWorker:
             return [data]
         return []
 
+    def encode_message(self, message: dict[str, Any]) -> str | bytes:
+        """Encode an outbound control message (auth/subscribe/unsubscribe) in
+        the stream's wire codec. Subclasses negotiating a non-JSON codec must
+        override this to match — Alpaca rejects JSON control frames on a
+        msgpack-negotiated connection."""
+        return orjson.dumps(message).decode("utf-8")
+
     def idle_reconnect_seconds(self) -> float:
         """Idle watchdog threshold; 0 disables. Subclasses override."""
         return 0.0
@@ -343,13 +350,13 @@ class BaseStreamWorker:
         log.info("attempting message-based authentication (%s)", self.stream_name)
         try:
             await ws.send(
-                orjson.dumps(
+                self.encode_message(
                     {
                         "action": "auth",
                         "key": self._config.alpaca_api_key,
                         "secret": self._config.alpaca_secret_key,
                     }
-                ).decode("utf-8")
+                )
             )
         except ConnectionClosed:
             return False
