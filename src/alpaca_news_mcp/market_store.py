@@ -59,6 +59,10 @@ class MarketSnapshotCache:
         with self._lock:
             return sorted(self._data)
 
+    def remove(self, symbol: str) -> None:
+        with self._lock:
+            self._data.pop(symbol.upper(), None)
+
     def clear(self) -> None:
         with self._lock:
             self._data.clear()

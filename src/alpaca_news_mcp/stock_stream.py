@@ -100,7 +100,15 @@ class StockStreamWorker(BaseStreamWorker):
             state,
             alerts,
             queue_maxsize=config.stock_queue_maxsize,
-            gap_fill_callback=self._bar_gap_fill if market_client is not None else None,
+            # Bar gap-fill only makes sense when a bar channel is actually
+            # ingested — otherwise reconnects would write REST bars the
+            # operator explicitly opted out of via STOCK_CHANNELS.
+            gap_fill_callback=(
+                self._bar_gap_fill
+                if market_client is not None
+                and {"bars", "updatedBars"} & set(config.stock_channels)
+                else None
+            ),
         )
         self._market_store = market_store
         self._market_client = market_client
@@ -158,6 +166,11 @@ class StockStreamWorker(BaseStreamWorker):
             added = new - current
             removed = current - new
             self._watchlist = new
+            # Evict removed symbols from the latest cache — a stale snapshot
+            # would keep serving old prices as source="stream" for a symbol
+            # that is no longer subscribed.
+            for sym in removed:
+                self._market_store.snapshots.remove(sym)
             await self._store.set_status(
                 WATCHLIST_STATUS_KEY, {"symbols": sorted(new)}
             )

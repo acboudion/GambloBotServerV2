@@ -302,3 +302,21 @@ def test_rate_limit_is_per_symbol_not_per_symbol_set():
         if a.category == "analyst_keyword"
     ]
     assert len(other) == 1
+
+
+def test_interest_alerts_respect_rate_limit():
+    """held_or_interested_symbol alerts must obey the per-symbol hourly cap
+    like every other non-critical category."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    first = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1), interest_symbols={"AAPL"}
+        )
+        if a.category == "held_or_interested_symbol"
+    ]
+    assert len(first) == 1
+    engine.count_emission(first[0])
+    # Bucket full: the next distinct article's interest alert suppresses.
+    again = engine.evaluate_article(_mk_article(id=2), interest_symbols={"AAPL"})
+    assert not any(a.category == "held_or_interested_symbol" for a in again)
+    assert engine.suppressed_alerts >= 1

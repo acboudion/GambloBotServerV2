@@ -552,3 +552,36 @@ async def test_bar_gap_fill_uses_captured_watermark(wired):
     from datetime import UTC as _UTC
     from datetime import datetime as _dt
     assert starts[0] == _dt.fromtimestamp(old_ts, tz=_UTC).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_watchlist_removal_evicts_snapshot_cache(wired):
+    """A removed symbol must not keep serving stale prices from the latest
+    cache as source="stream" — its snapshot is evicted on removal."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    market_store.snapshots.update("AAPL", "trade", {"p": 190.5, "ts_us": 1})
+    market_store.snapshots.update("TSLA", "trade", {"p": 250.0, "ts_us": 1})
+    out = await worker.update_watchlist(["AAPL"], mode="remove")
+    assert out["removed"] == ["AAPL"]
+    assert market_store.snapshots.get("AAPL") is None
+    # Symbols still on the watchlist keep their snapshots.
+    assert market_store.snapshots.get("TSLA") is not None
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_disabled_without_bar_channels(wired):
+    """With STOCK_CHANNELS excluding both bar channels, no bar gap-fill
+    callback is installed — reconnects must not write REST bars the
+    operator opted out of."""
+    cfg, store, market_store, state, alerts = wired
+    client = _FakeMarketClient()
+    cfg_no_bars = replace(cfg, stock_channels=["trades", "quotes"])
+    worker = _worker(cfg_no_bars, store, market_store, state, alerts,
+                     market_client=client)
+    assert worker._gap_fill is None
+    StockStreamWorker.reset_singleton()
+    cfg_updated_only = replace(cfg, stock_channels=["trades", "updatedBars"])
+    worker2 = _worker(cfg_updated_only, store, market_store, state, alerts,
+                      market_client=client)
+    assert worker2._gap_fill is not None

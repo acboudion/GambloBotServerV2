@@ -319,7 +319,9 @@ class AlertEngine:
         )
         direction = self.direction_of(text_lower)
 
-        if interest_hits:
+        if interest_hits and not self._rate_limited(
+            interest_hits, "held_or_interested_symbol", "high"
+        ):
             alerts.append(
                 self._mk_alert(
                     article=article,
