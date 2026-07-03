@@ -371,7 +371,9 @@ class NewsStreamWorker(BaseStreamWorker):
                         result.article, interest_symbols=interest
                     ):
                         inserted = await writer.record_alert(
-                            alert, raw_json=normalized.raw_json
+                            alert,
+                            raw_json=normalized.raw_json,
+                            content_hash=normalized.content_hash,
                         )
                         if inserted:
                             pending_alerts.append(alert)

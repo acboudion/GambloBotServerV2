@@ -95,10 +95,21 @@ async def _m3_raw_events_replayed(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _m4_alert_upgrades(conn: aiosqlite.Connection) -> None:
+    """Cross-source dedup (content_hash) + direction tagging for alerts."""
+    await ensure_column(conn, "alerts", "content_hash", "TEXT")
+    await ensure_column(conn, "alerts", "direction", "TEXT NOT NULL DEFAULT 'neutral'")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alerts_content_hash "
+        "ON alerts(category, content_hash, created_at)"
+    )
+
+
 NEWS_MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _m1_news_seq),
     (2, _m2_news_fts),
     (3, _m3_raw_events_replayed),
+    (4, _m4_alert_upgrades),
 ]
 
 

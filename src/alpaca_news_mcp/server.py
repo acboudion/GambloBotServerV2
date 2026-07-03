@@ -56,6 +56,8 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
     alerts = AlertEngine(
         high_latency_alert_ms=config.high_latency_alert_ms,
         halt_alert_dedup_seconds=config.halt_alert_dedup_seconds,
+        keywords_file=config.alert_keywords_file or None,
+        rate_limit_per_symbol_hour=config.alert_rate_limit_per_symbol_hour,
     )
     rest_backfill = RestBackfillWorker(config, store, state, alerts)
     NewsStreamWorker.reset_singleton()

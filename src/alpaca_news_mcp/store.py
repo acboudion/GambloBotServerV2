@@ -47,8 +47,12 @@ class BatchWriter:
     ) -> UpsertResult:
         return await self._store._upsert_article_locked(normalized, source_kind=source_kind)
 
-    async def record_alert(self, alert: Alert, *, raw_json: str) -> bool:
-        return await self._store._record_alert_locked(alert, raw_json=raw_json)
+    async def record_alert(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        return await self._store._record_alert_locked(
+            alert, raw_json=raw_json, content_hash=content_hash
+        )
 
 
 def _utcnow_iso() -> str:
@@ -486,21 +490,43 @@ class Store:
             )
             await self.conn.commit()
 
-    async def record_alert(self, alert: Alert, *, raw_json: str) -> bool:
-        """Insert an alert. Returns True if inserted, False if (article_id, category) already exists."""
+    async def record_alert(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        """Insert an alert. Returns True if inserted, False if deduplicated."""
         async with self._write_lock:
-            inserted = await self._record_alert_locked(alert, raw_json=raw_json)
+            inserted = await self._record_alert_locked(
+                alert, raw_json=raw_json, content_hash=content_hash
+            )
             await self.conn.commit()
             return inserted
 
-    async def _record_alert_locked(self, alert: Alert, *, raw_json: str) -> bool:
+    async def _record_alert_locked(
+        self, alert: Alert, *, raw_json: str, content_hash: str | None = None
+    ) -> bool:
+        # Cross-source dedup: the same story republished under a different
+        # article id (news is single-sourced today, but re-syndication and
+        # updates produce identical bodies) must not alert twice per category.
+        if content_hash:
+            window_start = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+            cur = await self.conn.execute(
+                "SELECT 1 FROM alerts WHERE category = ? AND content_hash = ? "
+                "AND created_at >= ? AND (article_id IS NULL OR article_id != ?) "
+                "LIMIT 1",
+                (alert.category, content_hash, window_start, alert.article_id),
+            )
+            duplicate = await cur.fetchone()
+            await cur.close()
+            if duplicate is not None:
+                return False
         try:
             await self.conn.execute(
                 """
                 INSERT INTO alerts (
                     alert_id, article_id, created_at, severity, category,
-                    symbols_json, headline, reason, acknowledged, raw_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    symbols_json, headline, reason, acknowledged, raw_json,
+                    content_hash, direction
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                 """,
                 (
                     alert.alert_id,
@@ -512,6 +538,8 @@ class Store:
                     alert.headline,
                     alert.reason,
                     raw_json,
+                    content_hash,
+                    alert.direction,
                 ),
             )
             return True
@@ -788,6 +816,8 @@ class Store:
                     "headline": r["headline"],
                     "reason": r["reason"],
                     "acknowledged": bool(r["acknowledged"]),
+                    "direction": (r["direction"] if "direction" in r.keys() else None)
+                    or "neutral",
                 }
             )
         # Filtered-out rows still advance rowid; same conservative-cursor rule
@@ -913,6 +943,7 @@ class Store:
                 headline=r["headline"],
                 reason=r["reason"],
                 acknowledged=bool(r["acknowledged"]),
+                direction=(r["direction"] if "direction" in r.keys() else None) or "neutral",
             )
             for r in rows
         ]

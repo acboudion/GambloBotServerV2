@@ -148,6 +148,8 @@ class Config:
 
     # Alerts
     halt_alert_dedup_seconds: int
+    alert_keywords_file: str
+    alert_rate_limit_per_symbol_hour: int
 
     high_latency_alert_ms: int = 30_000
 
@@ -237,6 +239,10 @@ class Config:
                 "MARKET_CACHE_CORPORATE_ACTIONS_TTL", 600
             ),
             halt_alert_dedup_seconds=_get_int("HALT_ALERT_DEDUP_SECONDS", 300),
+            alert_keywords_file=_get_str("ALERT_KEYWORDS_FILE", ""),
+            alert_rate_limit_per_symbol_hour=_get_int(
+                "ALERT_RATE_LIMIT_PER_SYMBOL_HOUR", 10
+            ),
             high_latency_alert_ms=_get_int("HIGH_LATENCY_ALERT_MS", 30_000),
         )
 

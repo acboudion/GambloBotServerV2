@@ -233,7 +233,11 @@ class RestBackfillWorker:
                 interest_symbols=interest,
                 suppress_high_latency=True,
             ):
-                inserted = await self._store.record_alert(alert, raw_json=normalized.raw_json)
+                inserted = await self._store.record_alert(
+                    alert,
+                    raw_json=normalized.raw_json,
+                    content_hash=normalized.content_hash,
+                )
                 if inserted:
                     self._state.record_alert(alert)
         if result.was_new:

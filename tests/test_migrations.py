@@ -43,6 +43,19 @@ CREATE TABLE raw_events (
     message_type TEXT,
     raw_json TEXT NOT NULL
 );
+CREATE TABLE alerts (
+    alert_id TEXT PRIMARY KEY,
+    article_id INTEGER,
+    created_at TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    category TEXT NOT NULL,
+    symbols_json TEXT NOT NULL DEFAULT '[]',
+    headline TEXT,
+    reason TEXT NOT NULL,
+    acknowledged INTEGER NOT NULL DEFAULT 0,
+    raw_json TEXT NOT NULL,
+    FOREIGN KEY(article_id) REFERENCES news_articles(id)
+);
 """
 
 

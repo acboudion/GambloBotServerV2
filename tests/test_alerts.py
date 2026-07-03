@@ -130,3 +130,107 @@ def test_stream_error_alert_classification():
     b = eng.stream_error_alert(code=409, message="insufficient subscription", entitlement=True)
     assert b.category == "entitlement_error"
     assert b.severity == "critical"
+
+
+# ---- alert engine upgrades (keywords file, direction, rate limit, dedup) -----
+
+import json as _json  # noqa: E402
+
+from alpaca_news_mcp.alerts import AlertEngine as _Engine  # noqa: E402
+from alpaca_news_mcp.models import NewsArticle as _Article  # noqa: E402
+
+
+def _mk_article(id=1, headline="h", symbols=("AAPL",), summary=None):
+    return _Article(
+        id=id,
+        headline=headline,
+        summary=summary,
+        first_seen_at="2026-07-02T10:00:00+00:00",
+        last_seen_at="2026-07-02T10:00:00+00:00",
+        last_seen_source="ws",
+        symbols=list(symbols),
+    )
+
+
+def test_corporate_action_group_fires_dead_category_no_more():
+    engine = _Engine()
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Board approves 10-for-1 stock split"),
+        interest_symbols=set(),
+    )
+    cats = {a.category for a in alerts}
+    assert "corporate_action_keyword" in cats
+
+
+def test_direction_tagging_bullish_vs_bearish():
+    engine = _Engine()
+    beats = engine.evaluate_article(
+        _mk_article(headline="MegaCorp beats earnings, raises outlook"),
+        interest_symbols=set(),
+    )
+    earnings = [a for a in beats if a.category == "earnings_keyword"]
+    assert earnings[0].direction == "bullish"
+
+    misses = engine.evaluate_article(
+        _mk_article(id=2, headline="MegaCorp misses earnings, cuts outlook"),
+        interest_symbols=set(),
+    )
+    earnings = [a for a in misses if a.category == "earnings_keyword"]
+    assert earnings[0].direction == "bearish"
+
+
+def test_keywords_file_merge(tmp_path):
+    kw = tmp_path / "kw.json"
+    kw.write_text(_json.dumps({
+        "mna": {"phrases": ["scheme of arrangement"]},
+        "custom_topic": {"phrases": ["quantum widget"], "bullish": ["quantum widget"]},
+    }))
+    engine = _Engine(keywords_file=str(kw))
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Target agrees to scheme of arrangement"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "mna_keyword" for a in alerts)
+    # Unknown group maps to breaking_keyword.
+    alerts = engine.evaluate_article(
+        _mk_article(id=3, headline="Quantum widget shipped"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "breaking_keyword" for a in alerts)
+
+
+def test_keywords_file_bad_json_falls_back(tmp_path):
+    kw = tmp_path / "kw.json"
+    kw.write_text("{not json")
+    engine = _Engine(keywords_file=str(kw))
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Merger announced"), interest_symbols=set()
+    )
+    assert any(a.category == "mna_keyword" for a in alerts)
+
+
+def test_rate_limit_suppresses_but_critical_exempt():
+    engine = _Engine(rate_limit_per_symbol_hour=2)
+    for i in range(5):
+        engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        )
+    # Only 2 analyst alerts allowed per hour for the same symbol set.
+    total = sum(
+        1
+        for i in range(5, 10)
+        for a in engine.evaluate_article(
+            _mk_article(id=i, headline=f"Analyst upgrade #{i}"),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    )
+    assert total == 0
+    assert engine.suppressed_alerts >= 3
+
+    # Critical alerts bypass the limiter entirely.
+    crit = engine.evaluate_article(
+        _mk_article(id=99, headline="Bankruptcy filing"), interest_symbols=set()
+    )
+    assert any(a.severity == "critical" for a in crit)

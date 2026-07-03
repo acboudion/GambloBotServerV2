@@ -343,3 +343,44 @@ async def test_batch_writer_rolls_back_on_error(open_store):
         normalize_news_message(_payload(2001)), source_kind="ws"
     )
     assert await open_store.get_article(2001) is not None
+
+
+@pytest.mark.asyncio
+async def test_alert_cross_source_dedup_by_content_hash(open_store):
+    """The same story under a different article id (same content hash) must
+    not produce a second alert in the same category within 24h."""
+    from alpaca_news_mcp.models import Alert
+
+    await open_store.upsert_article(
+        normalize_news_message(_payload(1, headline="MegaCorp merger")),
+        source_kind="ws",
+    )
+    await open_store.upsert_article(
+        normalize_news_message(_payload(2, headline="MegaCorp merger repost")),
+        source_kind="ws",
+    )
+
+    def _alert(alert_id, article_id):
+        from datetime import UTC, datetime
+        return Alert(
+            alert_id=alert_id, article_id=article_id,
+            created_at=datetime.now(UTC).isoformat(),
+            severity="high", category="mna_keyword", symbols=["AAPL"],
+            reason="keyword match",
+        )
+
+    assert await open_store.record_alert(
+        _alert("a1", 1), raw_json="{}", content_hash="samehash"
+    )
+    # Different article, same content hash + category → deduped.
+    assert not await open_store.record_alert(
+        _alert("a2", 2), raw_json="{}", content_hash="samehash"
+    )
+    # Different category still records.
+    from alpaca_news_mcp.models import Alert as A
+    other = _alert("a3", 2).model_copy(update={"category": "breaking_keyword"})
+    assert isinstance(other, A)
+    assert await open_store.record_alert(other, raw_json="{}", content_hash="samehash")
+    # Direction round-trips through get_alerts.
+    alerts = await open_store.get_alerts(minutes=5, limit=10)
+    assert all(a.direction == "neutral" for a in alerts)

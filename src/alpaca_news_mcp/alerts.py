@@ -1,14 +1,29 @@
-"""Deterministic alert generation."""
+"""Deterministic alert generation.
+
+Keyword groups are configurable: ALERT_KEYWORDS_FILE may point at a JSON file
+of the shape {group: {"phrases": [...], "critical_phrases": [...],
+"bullish": [...], "bearish": [...]}} which is deep-merged over the built-ins
+(lists are unioned). Regexes are compiled once at engine construction.
+"""
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 
+from .logging_utils import get_logger
 from .models import Alert, AlertCategory, NewsArticle, Severity
+
+log = get_logger(__name__)
+
+Direction = Literal["bullish", "bearish", "neutral"]
 
 KEYWORDS: dict[str, list[str]] = {
     "mna": [
@@ -35,6 +50,11 @@ KEYWORDS: dict[str, list[str]] = {
         "bankruptcy", "chapter 11", "delisting", "nasdaq notice",
         "going concern", "halted", "suspension",
     ],
+    "corporate_action": [
+        "stock split", "reverse split", "special dividend", "spin-off",
+        "spinoff", "tender offer", "buyback", "share repurchase",
+        "rights offering", "dividend increase", "dividend cut",
+    ],
 }
 
 CATEGORY_MAP: dict[str, AlertCategory] = {
@@ -44,6 +64,7 @@ CATEGORY_MAP: dict[str, AlertCategory] = {
     "legal_regulatory": "legal_regulatory_keyword",
     "analyst": "analyst_keyword",
     "halt_risk": "halt_risk_keyword",
+    "corporate_action": "corporate_action_keyword",
 }
 
 CRITICAL_PHRASES: set[str] = {
@@ -52,20 +73,59 @@ CRITICAL_PHRASES: set[str] = {
 }
 
 HIGH_BASE_GROUPS: set[str] = {"mna", "earnings", "financing"}
+MEDIUM_BASE_GROUPS: set[str] = {"analyst", "corporate_action"}
+
+BULLISH_TERMS: list[str] = [
+    "beats", "raises outlook", "raises guidance", "upgrade", "overweight",
+    "buy rating", "approval", "approved", "record revenue", "dividend increase",
+    "buyback", "share repurchase", "wins", "awarded", "surges",
+]
+BEARISH_TERMS: list[str] = [
+    "misses", "cuts outlook", "cuts guidance", "downgrade", "underweight",
+    "sell rating", "investigation", "subpoena", "lawsuit", "fraud",
+    "bankruptcy", "chapter 11", "delisting", "going concern", "dilution",
+    "dividend cut", "recall", "plunges", "halted",
+]
 
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _contains_any(text: str, phrases: list[str]) -> list[str]:
-    matched: list[str] = []
-    for p in phrases:
-        # word-boundary-ish match: avoid matching "secured" for "sec"
-        pattern = r"\b" + re.escape(p.lower()) + r"\b"
-        if re.search(pattern, text):
-            matched.append(p)
-    return matched
+def _compile_phrases(phrases: list[str]) -> list[tuple[str, re.Pattern[str]]]:
+    # word-boundary-ish match: avoid matching "secured" for "sec"
+    return [
+        (p, re.compile(r"\b" + re.escape(p.lower()) + r"\b")) for p in phrases
+    ]
+
+
+def _match_compiled(
+    text: str, compiled: list[tuple[str, re.Pattern[str]]]
+) -> list[str]:
+    return [p for p, pattern in compiled if pattern.search(text)]
+
+
+def load_keyword_overrides(path: str) -> dict[str, dict[str, list[str]]]:
+    """Parse an ALERT_KEYWORDS_FILE. Returns {} on any problem (logged)."""
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("ALERT_KEYWORDS_FILE unusable (%s); using built-ins", e)
+        return {}
+    if not isinstance(raw, dict):
+        log.warning("ALERT_KEYWORDS_FILE must be a JSON object; using built-ins")
+        return {}
+    out: dict[str, dict[str, list[str]]] = {}
+    for group, spec in raw.items():
+        if not isinstance(spec, dict):
+            continue
+        cleaned: dict[str, list[str]] = {}
+        for key in ("phrases", "critical_phrases", "bullish", "bearish"):
+            values = spec.get(key)
+            if isinstance(values, list):
+                cleaned[key] = [str(v).lower() for v in values if str(v).strip()]
+        out[str(group)] = cleaned
+    return out
 
 
 @dataclass
@@ -81,11 +141,69 @@ class AlertEngine:
         *,
         high_latency_alert_ms: int = 30_000,
         halt_alert_dedup_seconds: int = 300,
+        keywords_file: str | None = None,
+        rate_limit_per_symbol_hour: int = 0,
     ) -> None:
         self.high_latency_alert_ms = high_latency_alert_ms
         self.halt_alert_dedup_seconds = halt_alert_dedup_seconds
+        self.rate_limit_per_symbol_hour = rate_limit_per_symbol_hour
+        self.suppressed_alerts = 0
         # (symbol, category) -> monotonic timestamp of last emitted alert
         self._recent_market_alerts: dict[tuple[str, str], float] = {}
+        # (symbols-key, category) -> deque of monotonic emit times (rate limit)
+        self._emit_times: dict[tuple[str, str], deque[float]] = {}
+
+        keywords = {group: list(phrases) for group, phrases in KEYWORDS.items()}
+        critical = set(CRITICAL_PHRASES)
+        bullish = list(BULLISH_TERMS)
+        bearish = list(BEARISH_TERMS)
+        if keywords_file:
+            for group, spec in load_keyword_overrides(keywords_file).items():
+                merged = keywords.setdefault(group, [])
+                for phrase in spec.get("phrases", []):
+                    if phrase not in merged:
+                        merged.append(phrase)
+                critical.update(spec.get("critical_phrases", []))
+                for term in spec.get("bullish", []):
+                    if term not in bullish:
+                        bullish.append(term)
+                for term in spec.get("bearish", []):
+                    if term not in bearish:
+                        bearish.append(term)
+        self.critical_phrases = critical
+        # Compile once; per-article evaluation only runs the compiled patterns.
+        self._compiled_groups: dict[str, list[tuple[str, re.Pattern[str]]]] = {
+            group: _compile_phrases(phrases) for group, phrases in keywords.items()
+        }
+        self._compiled_bullish = _compile_phrases(bullish)
+        self._compiled_bearish = _compile_phrases(bearish)
+        self._compiled_breaking = _compile_phrases(["breaking", "alert:", "developing"])
+
+    def direction_of(self, text_lower: str) -> Direction:
+        bull = len(_match_compiled(text_lower, self._compiled_bullish))
+        bear = len(_match_compiled(text_lower, self._compiled_bearish))
+        if bull > bear:
+            return "bullish"
+        if bear > bull:
+            return "bearish"
+        return "neutral"
+
+    def _rate_limited(
+        self, symbols: list[str], category: str, severity: Severity
+    ) -> bool:
+        """Per-(symbols, category) hourly cap. Critical alerts are exempt."""
+        if self.rate_limit_per_symbol_hour <= 0 or severity == "critical":
+            return False
+        key = (",".join(sorted(s.upper() for s in symbols)), category)
+        now = time.monotonic()
+        times = self._emit_times.setdefault(key, deque())
+        while times and now - times[0] > 3600:
+            times.popleft()
+        if len(times) >= self.rate_limit_per_symbol_hour:
+            self.suppressed_alerts += 1
+            return True
+        times.append(now)
+        return False
 
     def _market_alert_deduped(self, symbol: str, category: str) -> bool:
         """True when an identical (symbol, category) alert fired recently."""
@@ -178,6 +296,7 @@ class AlertEngine:
             text_lower=text_lower,
             interest_hits=interest_hits,
         )
+        direction = self.direction_of(text_lower)
 
         if interest_hits:
             alerts.append(
@@ -187,51 +306,60 @@ class AlertEngine:
                     category="held_or_interested_symbol",
                     symbols=interest_hits,
                     reason=f"article mentions interest symbol(s): {', '.join(interest_hits)}",
+                    direction=direction,
                 )
             )
 
-        # Keyword groups
-        for group, phrases in KEYWORDS.items():
-            matched = _contains_any(text_lower, phrases)
+        # Keyword groups (compiled at engine construction)
+        for group, compiled in self._compiled_groups.items():
+            matched = _match_compiled(text_lower, compiled)
             if not matched:
                 continue
             severity: Severity
-            if any(p in CRITICAL_PHRASES for p in matched):
+            if any(p in self.critical_phrases for p in matched):
                 severity = "critical"
             elif group in HIGH_BASE_GROUPS:
                 severity = "high"
             elif interest_hits:
                 severity = "high"
             else:
-                severity = "medium" if group == "analyst" else "low"
+                severity = "medium" if group in MEDIUM_BASE_GROUPS else "low"
 
             if interest_hits and severity == "low":
                 severity = "medium"
             if interest_hits and severity == "medium":
                 severity = "high"
 
+            category = CATEGORY_MAP.get(group, "breaking_keyword")
+            symbols = ctx.interest_hits or list(article.symbols)
+            if self._rate_limited(symbols, category, severity):
+                continue
             alerts.append(
                 self._mk_alert(
                     article=article,
                     severity=severity,
-                    category=CATEGORY_MAP[group],
-                    symbols=ctx.interest_hits or list(article.symbols),
+                    category=category,
+                    symbols=symbols,
                     reason=f"keyword match in {group}: {', '.join(sorted(set(matched)))}",
+                    direction=direction,
                 )
             )
 
         # Generic breaking flag
-        breaking_phrases = ["breaking", "alert:", "developing"]
-        if _contains_any(text_lower, breaking_phrases):
-            alerts.append(
-                self._mk_alert(
-                    article=article,
-                    severity="high" if interest_hits else "medium",
-                    category="breaking_keyword",
-                    symbols=interest_hits or list(article.symbols),
-                    reason="article tagged as breaking/developing",
+        if _match_compiled(text_lower, self._compiled_breaking):
+            severity = "high" if interest_hits else "medium"
+            symbols = interest_hits or list(article.symbols)
+            if not self._rate_limited(symbols, "breaking_keyword", severity):
+                alerts.append(
+                    self._mk_alert(
+                        article=article,
+                        severity=severity,
+                        category="breaking_keyword",
+                        symbols=symbols,
+                        reason="article tagged as breaking/developing",
+                        direction=direction,
+                    )
                 )
-            )
 
         # High-latency. Suppressed for ingestion paths where `latency_ms` does
         # not reflect real-time pipeline delay (e.g. REST backfill, where
@@ -329,6 +457,7 @@ class AlertEngine:
         category: AlertCategory,
         symbols: list[str],
         reason: str,
+        direction: Direction = "neutral",
     ) -> Alert:
         return Alert(
             alert_id=str(uuid.uuid4()),
@@ -340,4 +469,5 @@ class AlertEngine:
             headline=article.headline,
             reason=reason,
             acknowledged=False,
+            direction=direction,
         )

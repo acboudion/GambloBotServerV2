@@ -72,6 +72,7 @@ class Alert(BaseModel):
     headline: str | None = None
     reason: str
     acknowledged: bool = False
+    direction: Literal["bullish", "bearish", "neutral"] = "neutral"
 
 
 class SubscriptionState(BaseModel):

@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     reason TEXT NOT NULL,
     acknowledged INTEGER NOT NULL DEFAULT 0,
     raw_json TEXT NOT NULL,
+    content_hash TEXT,
+    direction TEXT NOT NULL DEFAULT 'neutral',
     FOREIGN KEY(article_id) REFERENCES news_articles(id)
 );
 

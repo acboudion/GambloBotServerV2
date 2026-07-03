@@ -98,6 +98,7 @@ def register(mcp: FastMCP) -> None:
         d = h.model_dump()
         d["service"] = "alpaca-news-mcp"
         d["rest_backfill_enabled"] = app.config.enable_rest_backfill
+        d["alerts_suppressed_by_rate_limit"] = app.alerts.suppressed_alerts
         return d
 
     @mcp.tool(description="Return requested vs acknowledged Alpaca news subscription state.")
