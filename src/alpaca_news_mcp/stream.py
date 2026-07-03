@@ -368,10 +368,11 @@ class NewsStreamWorker(BaseStreamWorker):
             return
         interest = self._state.get_interest_symbols()
         pending_alerts = []
+        pending_articles = []
         async with self._store.batch_writer() as writer:
             for normalized in normalized_items:
                 result = await writer.upsert_article(normalized, source_kind="ws")
-                self._state.record_article(result.article, was_new=result.was_new)
+                pending_articles.append((result.article, result.was_new))
                 if result.was_new or result.version_inserted:
                     for alert in self._alerts.evaluate_article(
                         result.article, interest_symbols=interest
@@ -382,10 +383,16 @@ class NewsStreamWorker(BaseStreamWorker):
                             content_hash=normalized.content_hash,
                         )
                         if inserted:
-                            self._alerts.count_emission(alert)
                             pending_alerts.append(alert)
-        # Count alerts only after the batch commit actually lands.
+        # Advance in-memory state only after the batch commit actually lands:
+        # record_article moves the gap-fill watermark (last_seen_updated_at),
+        # so doing it mid-transaction would let a rollback leave the watermark
+        # past articles that never reached SQLite — permanently skipping them
+        # on the next gap-fill. Alert quota/state likewise.
+        for article, was_new in pending_articles:
+            self._state.record_article(article, was_new=was_new)
         for alert in pending_alerts:
+            self._alerts.count_emission(alert)
             self._state.record_alert(alert)
 
     @staticmethod

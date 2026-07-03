@@ -598,3 +598,40 @@ async def test_malformed_message_is_recorded_and_loop_survives(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_rolled_back_batch_does_not_advance_watermark(wired, monkeypatch):
+    """A failed batch write must not advance in-memory article state: the
+    gap-fill watermark (last_seen_updated_at) would otherwise end up past
+    articles that never reached SQLite, permanently skipping them on the
+    next reconnect gap-fill."""
+    cfg, store, state, alerts = wired
+    NewsStreamWorker.reset_singleton()
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+
+    def payload(i: int, updated: str) -> dict:
+        return {
+            "T": "n", "id": i, "headline": f"a{i}", "summary": "s",
+            "created_at": "2026-04-28T19:00:00Z", "updated_at": updated,
+            "content": "", "symbols": ["AAPL"], "source": "benzinga",
+        }
+
+    calls = 0
+    orig = store._upsert_article_locked
+
+    async def flaky(normalized, *, source_kind):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("boom")
+        return await orig(normalized, source_kind=source_kind)
+
+    monkeypatch.setattr(store, "_upsert_article_locked", flaky)
+    with pytest.raises(RuntimeError):
+        await worker._persist_batch(
+            [payload(1, "2026-04-28T19:00:00Z"), payload(2, "2026-04-28T19:00:01Z")]
+        )
+    # The batch rolled back: nothing committed, watermark untouched.
+    assert state.last_seen_updated_at is None
+    assert await store.get_article(1) is None

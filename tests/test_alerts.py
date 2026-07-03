@@ -268,3 +268,37 @@ def test_deduped_alerts_do_not_consume_rate_limit_quota():
         interest_symbols=set(),
     )
     assert not any(a.category == "analyst_keyword" for a in after)
+
+
+def test_rate_limit_is_per_symbol_not_per_symbol_set():
+    """Co-mentions must not route around a symbol's hourly cap: ['AAPL'] and
+    ['AAPL', 'MSFT'] check and charge the same AAPL bucket."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    # Fill AAPL's analyst bucket via a single-symbol alert.
+    single = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=1, headline="Analyst upgrade"), interest_symbols=set()
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert len(single) == 1
+    engine.count_emission(single[0])
+    # A co-mention including AAPL is suppressed by AAPL's full bucket.
+    co = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=2, headline="Analyst upgrade again", symbols=("AAPL", "MSFT")),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert co == []
+    assert engine.suppressed_alerts >= 1
+    # An unrelated symbol's bucket is unaffected.
+    other = [
+        a for a in engine.evaluate_article(
+            _mk_article(id=3, headline="Analyst upgrade elsewhere", symbols=("NVDA",)),
+            interest_symbols=set(),
+        )
+        if a.category == "analyst_keyword"
+    ]
+    assert len(other) == 1

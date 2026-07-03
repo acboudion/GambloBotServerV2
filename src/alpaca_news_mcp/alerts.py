@@ -189,25 +189,32 @@ class AlertEngine:
         return "neutral"
 
     @staticmethod
-    def _quota_key(symbols: list[str], category: str) -> tuple[str, str]:
-        return (",".join(sorted(s.upper() for s in symbols)), category)
+    def _quota_keys(symbols: list[str], category: str) -> list[tuple[str, str]]:
+        """One bucket per individual symbol — a co-mention (AAPL+MSFT) checks
+        and charges every mentioned symbol's bucket, so noisy co-mentions
+        can't route around a single symbol's hourly cap."""
+        if not symbols:
+            return [("", category)]
+        return [(s, category) for s in sorted({s.upper() for s in symbols})]
 
     def _rate_limited(
         self, symbols: list[str], category: str, severity: Severity
     ) -> bool:
-        """Per-(symbols, category) hourly cap check. Critical alerts exempt.
-        Checks only — quota is charged via count_emission() once the alert is
-        actually inserted, so store-level dedup (same content hash) doesn't
-        burn quota and suppress later distinct alerts."""
+        """Per-(symbol, category) hourly cap check; suppress when ANY mentioned
+        symbol is over quota. Critical alerts exempt. Checks only — quota is
+        charged via count_emission() once the alert is actually inserted, so
+        store-level dedup (same content hash) doesn't burn quota and suppress
+        later distinct alerts."""
         if self.rate_limit_per_symbol_hour <= 0 or severity == "critical":
             return False
         now = time.monotonic()
-        times = self._emit_times.setdefault(self._quota_key(symbols, category), deque())
-        while times and now - times[0] > 3600:
-            times.popleft()
-        if len(times) >= self.rate_limit_per_symbol_hour:
-            self.suppressed_alerts += 1
-            return True
+        for key in self._quota_keys(symbols, category):
+            times = self._emit_times.setdefault(key, deque())
+            while times and now - times[0] > 3600:
+                times.popleft()
+            if len(times) >= self.rate_limit_per_symbol_hour:
+                self.suppressed_alerts += 1
+                return True
         return False
 
     def count_emission(self, alert: Alert) -> None:
@@ -215,9 +222,9 @@ class AlertEngine:
         Persisters call this after Store.record_alert returns True."""
         if self.rate_limit_per_symbol_hour <= 0 or alert.severity == "critical":
             return
-        self._emit_times.setdefault(
-            self._quota_key(alert.symbols, alert.category), deque()
-        ).append(time.monotonic())
+        now = time.monotonic()
+        for key in self._quota_keys(alert.symbols, alert.category):
+            self._emit_times.setdefault(key, deque()).append(now)
 
     def _market_alert_deduped(self, symbol: str, category: str) -> bool:
         """True when an identical (symbol, category) alert fired recently."""
