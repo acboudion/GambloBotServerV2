@@ -343,3 +343,86 @@ async def test_statuses_and_lulds_keep_raw_payloads_ticks_do_not(wired):
     status_raw = dict(rows)["s"]
     assert status_raw["sc"] == "H" and status_raw["S"] == "AAPL"
     assert luld_raw["u"] == 200.0
+
+
+class _FakeMarketClient:
+    """Duck-typed stand-in for MarketDataClient in gap-fill tests."""
+
+    def __init__(self, bars_by_symbol=None, error=None):
+        self.bars_by_symbol = bars_by_symbol or {}
+        self.error = error
+        self.bars_calls = 0
+
+    async def bars(self, symbols, *, start_iso, end_iso=None, timeframe="1Min",
+                   limit_per_page=1000):
+        self.bars_calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.bars_by_symbol
+
+    async def is_market_open(self):
+        return True
+
+
+@pytest.mark.asyncio
+async def test_bar_gap_fill_runs_on_first_session_after_restart(wired):
+    """A restarted process must backfill bars on its FIRST connection — stocks
+    have no startup backfill, so skipping the first session loses data."""
+    cfg, store, market_store, state, alerts = wired
+    fake_client = _FakeMarketClient(
+        bars_by_symbol={"AAPL": [{"t": "2026-04-28T15:29:00Z", "o": 1, "h": 2,
+                                  "l": 0.5, "c": 1.5, "v": 100, "n": 5, "vw": 1.1}]}
+    )
+
+    async def handler(ws):
+        await ws.send(orjson.dumps([{"T": "success", "msg": "connected"}]).decode())
+        await ws.send(orjson.dumps([{"T": "success", "msg": "authenticated"}]).decode())
+        await ws.recv()  # subscribe message
+        await ws.send(orjson.dumps([{"T": "subscription", "trades": ["AAPL"]}]).decode())
+        await ws.wait_closed()
+
+    server = await websockets.serve(handler, "127.0.0.1", 0, ping_interval=None)
+    port = next(iter(server.sockets)).getsockname()[1]
+    cfg2 = replace(
+        cfg,
+        alpaca_stock_stream_url=f"ws://127.0.0.1:{port}/v2/test",
+        stock_stream_codec="json",
+    )
+    worker = _worker(cfg2, store, market_store, state, alerts,
+                     market_client=fake_client)
+    assert worker.gap_fill_on_first_session() is True
+    try:
+        await worker.start()
+        deadline = asyncio.get_event_loop().time() + 8
+        while asyncio.get_event_loop().time() < deadline:
+            if fake_client.bars_calls >= 1:
+                bars = await market_store.bars_window("AAPL", timeframe="1min", limit=10)
+                if bars:
+                    break
+            await asyncio.sleep(0.05)
+        assert fake_client.bars_calls >= 1
+        bars = await market_store.bars_window("AAPL", timeframe="1min", limit=10)
+        assert len(bars) == 1 and bars[0]["close"] == 1.5
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_bar_gap_fill_failure_reaches_retry_alerting(wired, monkeypatch):
+    """When the bars REST call fails, _bar_gap_fill must propagate so the
+    base retry/alert path records gap_fill_failure."""
+    import alpaca_news_mcp.ws_base as ws_base
+    from alpaca_news_mcp.market_client import MarketDataError
+
+    monkeypatch.setattr(ws_base, "GAP_FILL_RETRY_WAIT_SECONDS", 0.01)
+    cfg, store, market_store, state, alerts = wired
+    fake_client = _FakeMarketClient(error=MarketDataError("REST down"))
+    worker = _worker(cfg, store, market_store, state, alerts,
+                     market_client=fake_client)
+    await worker._gap_fill_with_retries()
+    assert fake_client.bars_calls == 3  # retried
+    assert state.snapshot_health("stocks").gap_fill_failures == 3
+    stored = await store.get_alerts(minutes=5, categories=["gap_fill_failure"], limit=10)
+    assert any(a.severity == "critical" for a in stored)

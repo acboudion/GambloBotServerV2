@@ -160,6 +160,13 @@ class BaseStreamWorker:
     async def on_session_ended(self, *, authed: bool) -> None:
         """Called after every connection ends, before the reconnect backoff."""
 
+    def gap_fill_on_first_session(self) -> bool:
+        """Whether gap-fill should also run on the FIRST authenticated session.
+        False for news (app_setup runs a startup REST backfill already); the
+        stock worker overrides to True since it has no startup backfill and a
+        restart would otherwise silently lose bars until the next reconnect."""
+        return False
+
     # ---- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -300,7 +307,9 @@ class BaseStreamWorker:
                 # Recover anything missed while disconnected. Runs AFTER the
                 # subscription is live (so nothing new is missed during the
                 # fill) and concurrently with the receive loop.
-                if self._gap_fill is not None and self._sessions_authed > 1:
+                if self._gap_fill is not None and (
+                    self._sessions_authed > 1 or self.gap_fill_on_first_session()
+                ):
                     self._spawn_gap_fill()
                 await self._receive_loop(ws)
             finally:

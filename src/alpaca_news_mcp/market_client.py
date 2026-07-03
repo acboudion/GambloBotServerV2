@@ -38,6 +38,10 @@ CORPORATE_ACTIONS_PATH = "/v1/corporate-actions"
 MAX_BARS_PAGES = 40
 
 
+class MarketDataError(RuntimeError):
+    """A REST request that callers must not silently treat as success."""
+
+
 class TTLCache:
     def __init__(self, maxsize: int = 256) -> None:
         self._data: dict[str, tuple[float, Any]] = {}
@@ -261,7 +265,12 @@ class MarketDataClient:
         limit_per_page: int = 1000,
     ) -> dict[str, list[dict[str, Any]]]:
         """Paginated /v2/stocks/bars for multiple symbols. Returns
-        {SYMBOL: [bar dicts with t/o/h/l/c/v/n/vw]}. Not cached (gap-fill use)."""
+        {SYMBOL: [bar dicts with t/o/h/l/c/v/n/vw]}. Not cached (gap-fill use).
+
+        Raises MarketDataError when any page fails — a partial result must not
+        look like a completed backfill, or the gap-fill retry/alert path in
+        BaseStreamWorker never runs and missing bars stay missing silently.
+        """
         out: dict[str, list[dict[str, Any]]] = {}
         if not symbols:
             return out
@@ -282,7 +291,10 @@ class MarketDataClient:
                 params.pop("page_token", None)
             payload = await self._get_json(host="data", path=BARS_PATH, params=params)
             if payload is None:
-                break
+                raise MarketDataError(
+                    f"bars request failed after {pages} page(s) "
+                    f"(timeframe={timeframe}, start={start_iso})"
+                )
             for sym, bars in (payload.get("bars") or {}).items():
                 out.setdefault(sym, []).extend(bars or [])
             pages += 1

@@ -126,3 +126,20 @@ async def test_bars_pagination(client):
     bars = await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
     assert [b["c"] for b in bars["AAPL"]] == [1.0, 2.0]
     assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_page_failure_raises_instead_of_partial_success(client):
+    """A failed bars page must raise so gap-fill retry/alerting engages —
+    returning a partial dict would make the backfill look complete."""
+    from alpaca_news_mcp.market_client import MarketDataError
+
+    route = respx.get("https://data.alpaca.markets/v2/stocks/bars")
+    route.side_effect = [
+        httpx.Response(200, json={"bars": {"AAPL": [{"t": "2026-07-02T13:30:00Z", "c": 1.0}]},
+                                  "next_page_token": "tok"}),
+        httpx.Response(500, text="boom"),
+    ]
+    with pytest.raises(MarketDataError):
+        await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")

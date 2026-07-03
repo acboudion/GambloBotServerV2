@@ -224,6 +224,12 @@ class StockStreamWorker(BaseStreamWorker):
     def idle_reconnect_seconds(self) -> float:
         return float(self._config.stock_idle_reconnect_seconds)
 
+    def gap_fill_on_first_session(self) -> bool:
+        # Unlike news (startup REST backfill in app_setup), stocks have no
+        # startup fill — after a process restart the first connection must
+        # backfill bars missed while down.
+        return True
+
     async def watchdog_should_fire(self) -> bool:
         """Only treat silence as a stall while the market is open. A closed
         market (or an unavailable clock) keeps the watchdog inert so we don't
