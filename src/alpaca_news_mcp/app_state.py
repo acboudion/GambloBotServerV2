@@ -6,8 +6,11 @@ from dataclasses import dataclass
 
 from .alerts import AlertEngine
 from .config import Config
+from .market_client import MarketDataClient
+from .market_store import MarketStore
 from .rest_backfill import RestBackfillWorker
 from .state import State
+from .stock_stream import StockStreamWorker
 from .store import Store
 from .stream import NewsStreamWorker
 
@@ -20,6 +23,9 @@ class AppState:
     alerts: AlertEngine
     stream: NewsStreamWorker
     rest_backfill: RestBackfillWorker
+    market_store: MarketStore | None = None
+    stock_stream: StockStreamWorker | None = None
+    market_client: MarketDataClient | None = None
 
 
 _app_state: AppState | None = None

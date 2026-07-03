@@ -21,6 +21,7 @@ dependencies = [
   "orjson>=3.10.0",
   "uvicorn>=0.30.0",
   "starlette>=0.40.0",
+  "msgpack>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ packages = ["src/alpaca_news_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/alpaca_news_mcp/schema.sql" = "alpaca_news_mcp/schema.sql"
+"src/alpaca_news_mcp/market_schema.sql" = "alpaca_news_mcp/market_schema.sql"
 
 [tool.ruff]
 line-length = 100

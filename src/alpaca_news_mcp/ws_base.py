@@ -84,6 +84,9 @@ class BaseStreamWorker:
         self._last_stale_alert: float | None = None
         self._sessions_authed = 0
         self._gap_fill_task: asyncio.Task[None] | None = None
+        # Live socket while connected+authenticated; lets subclasses send
+        # subscription deltas at runtime.
+        self._ws: Any | None = None
 
     @classmethod
     def reset_singleton(cls) -> None:
@@ -286,6 +289,7 @@ class BaseStreamWorker:
                 )
                 await self.on_authenticated(ws)
                 self._sessions_authed += 1
+                self._ws = ws
                 # Recover anything missed while disconnected. Runs AFTER the
                 # subscription is live (so nothing new is missed during the
                 # fill) and concurrently with the receive loop.
@@ -293,6 +297,7 @@ class BaseStreamWorker:
                     self._spawn_gap_fill()
                 await self._receive_loop(ws)
             finally:
+                self._ws = None
                 self._state.update_health(
                     self.stream_name, connected=False, authenticated=False
                 )

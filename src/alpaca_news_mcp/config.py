@@ -47,6 +47,35 @@ def _get_csv(key: str, default: str = "") -> list[str]:
 
 
 VALID_SUBSCRIPTION_MODES: Final = ("wildcard", "fallback")
+VALID_STOCK_CODECS: Final = ("msgpack", "json")
+# Canonical Alpaca v2 stock-stream channel names (subscription message keys).
+VALID_STOCK_CHANNELS: Final = (
+    "trades",
+    "quotes",
+    "bars",
+    "updatedBars",
+    "dailyBars",
+    "statuses",
+    "lulds",
+)
+
+
+def _get_channels(key: str, default: str) -> list[str]:
+    """Case-insensitive channel list normalized to canonical channel names."""
+    raw = os.getenv(key, default) or default
+    canonical = {c.lower(): c for c in VALID_STOCK_CHANNELS}
+    out: list[str] = []
+    for token in raw.split(","):
+        token = token.strip().lower()
+        if not token:
+            continue
+        if token not in canonical:
+            raise RuntimeError(
+                f"Invalid channel {token!r} in {key}; valid: {', '.join(VALID_STOCK_CHANNELS)}"
+            )
+        if canonical[token] not in out:
+            out.append(canonical[token])
+    return out
 
 
 @dataclass(frozen=True)
@@ -92,6 +121,34 @@ class Config:
 
     enable_manual_rest_backfill: bool
 
+    # Stock market-data stream
+    enable_stock_stream: bool
+    alpaca_stock_feed: str
+    alpaca_stock_stream_url: str
+    stock_stream_codec: str
+    stock_watchlist_symbols: list[str]
+    stock_channels: list[str]
+    stock_idle_reconnect_seconds: int
+    stock_queue_maxsize: int
+    stock_batch_max: int
+    stock_quote_sample_ms: int
+    market_storage_path: str
+    stock_tick_retention_minutes: int
+    stock_bar_retention_days: int
+    market_retention_interval_seconds: int
+
+    # REST market context
+    alpaca_trading_base_url: str
+    market_cache_clock_ttl: int
+    market_cache_calendar_ttl: int
+    market_cache_screener_ttl: int
+    market_cache_snapshot_ttl: int
+    market_cache_latest_ttl: int
+    market_cache_corporate_actions_ttl: int
+
+    # Alerts
+    halt_alert_dedup_seconds: int
+
     high_latency_alert_ms: int = 30_000
 
     extra_env_seen: dict[str, str] = field(default_factory=dict, repr=False)
@@ -102,6 +159,11 @@ class Config:
         if sub_mode not in VALID_SUBSCRIPTION_MODES:
             raise RuntimeError(
                 f"Invalid NEWS_SUBSCRIPTION_MODE={sub_mode!r}; must be one of {VALID_SUBSCRIPTION_MODES}"
+            )
+        stock_codec = _get_str("STOCK_STREAM_CODEC", "msgpack").lower()
+        if stock_codec not in VALID_STOCK_CODECS:
+            raise RuntimeError(
+                f"Invalid STOCK_STREAM_CODEC={stock_codec!r}; must be one of {VALID_STOCK_CODECS}"
             )
         return cls(
             alpaca_api_key=_get_str("ALPACA_API_KEY", required=True),
@@ -142,6 +204,39 @@ class Config:
             slow_client_warning_queue_depth=_get_int("SLOW_CLIENT_WARNING_QUEUE_DEPTH", 7500),
             queue_backpressure_seconds=_get_float("QUEUE_BACKPRESSURE_SECONDS", 2.0),
             enable_manual_rest_backfill=_get_bool("ENABLE_MANUAL_REST_BACKFILL", True),
+            enable_stock_stream=_get_bool("ENABLE_STOCK_STREAM", True),
+            alpaca_stock_feed=_get_str("ALPACA_STOCK_FEED", "sip").lower(),
+            alpaca_stock_stream_url=_get_str("ALPACA_STOCK_STREAM_URL", ""),
+            stock_stream_codec=stock_codec,
+            stock_watchlist_symbols=_get_csv(
+                "STOCK_WATCHLIST_SYMBOLS", "AAPL,MSFT,NVDA,TSLA,SPY,QQQ"
+            ),
+            stock_channels=_get_channels(
+                "STOCK_CHANNELS",
+                "trades,quotes,bars,updatedBars,dailyBars,statuses,lulds",
+            ),
+            stock_idle_reconnect_seconds=_get_int("STOCK_IDLE_RECONNECT_SECONDS", 120),
+            stock_queue_maxsize=_get_int("STOCK_QUEUE_MAXSIZE", 50_000),
+            stock_batch_max=_get_int("STOCK_BATCH_MAX", 2000),
+            stock_quote_sample_ms=_get_int("STOCK_QUOTE_SAMPLE_MS", 0),
+            market_storage_path=_get_str("MARKET_STORAGE_PATH", "/data/alpaca_market.sqlite"),
+            stock_tick_retention_minutes=_get_int("STOCK_TICK_RETENTION_MINUTES", 240),
+            stock_bar_retention_days=_get_int("STOCK_BAR_RETENTION_DAYS", 30),
+            market_retention_interval_seconds=_get_int(
+                "MARKET_RETENTION_INTERVAL_SECONDS", 900
+            ),
+            alpaca_trading_base_url=_get_str(
+                "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"
+            ),
+            market_cache_clock_ttl=_get_int("MARKET_CACHE_CLOCK_TTL", 15),
+            market_cache_calendar_ttl=_get_int("MARKET_CACHE_CALENDAR_TTL", 21_600),
+            market_cache_screener_ttl=_get_int("MARKET_CACHE_SCREENER_TTL", 30),
+            market_cache_snapshot_ttl=_get_int("MARKET_CACHE_SNAPSHOT_TTL", 5),
+            market_cache_latest_ttl=_get_int("MARKET_CACHE_LATEST_TTL", 2),
+            market_cache_corporate_actions_ttl=_get_int(
+                "MARKET_CACHE_CORPORATE_ACTIONS_TTL", 600
+            ),
+            halt_alert_dedup_seconds=_get_int("HALT_ALERT_DEDUP_SECONDS", 300),
             high_latency_alert_ms=_get_int("HIGH_LATENCY_ALERT_MS", 30_000),
         )
 

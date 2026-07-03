@@ -29,8 +29,11 @@ from .alerts import AlertEngine
 from .app_state import AppState, clear_app_state, get_app_state, set_app_state
 from .config import Config
 from .logging_utils import configure_logging, get_logger
+from .market_client import MarketDataClient
+from .market_store import MarketStore
 from .rest_backfill import RestBackfillWorker
 from .state import State
+from .stock_stream import StockStreamWorker
 from .store import Store
 from .stream import NewsStreamWorker
 
@@ -49,7 +52,10 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
     state = State()
     state.set_interest_symbols(config.news_interest_symbols, "replace")
 
-    alerts = AlertEngine(high_latency_alert_ms=config.high_latency_alert_ms)
+    alerts = AlertEngine(
+        high_latency_alert_ms=config.high_latency_alert_ms,
+        halt_alert_dedup_seconds=config.halt_alert_dedup_seconds,
+    )
     rest_backfill = RestBackfillWorker(config, store, state, alerts)
     NewsStreamWorker.reset_singleton()
     stream = NewsStreamWorker(
@@ -59,6 +65,24 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         alerts,
         gap_fill_callback=rest_backfill.gap_fill,
     )
+
+    market_client = MarketDataClient(config)
+    market_store: MarketStore | None = None
+    stock_stream: StockStreamWorker | None = None
+    if config.enable_stock_stream:
+        market_store = await MarketStore.open(config.market_storage_path)
+        await market_store.init_schema()
+        StockStreamWorker.reset_singleton()
+        stock_stream = StockStreamWorker(
+            config,
+            store,
+            market_store,
+            state,
+            alerts,
+            market_client=market_client,
+        )
+        await stock_stream.restore_watchlist()
+
     app_state = AppState(
         config=config,
         store=store,
@@ -66,6 +90,9 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         alerts=alerts,
         stream=stream,
         rest_backfill=rest_backfill,
+        market_store=market_store,
+        stock_stream=stock_stream,
+        market_client=market_client,
     )
     set_app_state(app_state)
 
@@ -76,24 +103,40 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
             log.warning("startup backfill failed (continuing): %s", e)
 
     await stream.start()
+    if stock_stream is not None:
+        await stock_stream.start()
     state.update_health(rest_backfill_enabled=config.enable_rest_backfill)
 
     pruner_task = asyncio.create_task(_retention_loop(app_state), name="retention")
+    market_pruner_task: asyncio.Task[None] | None = None
+    if market_store is not None:
+        market_pruner_task = asyncio.create_task(
+            _market_retention_loop(app_state), name="market-retention"
+        )
 
     try:
         yield app_state
     finally:
         log.info("alpaca-news-mcp shutting down")
-        pruner_task.cancel()
-        try:
-            await pruner_task
-        except (asyncio.CancelledError, Exception):
-            pass
+        for task in (pruner_task, market_pruner_task):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if stock_stream is not None:
+            await stock_stream.stop()
         await stream.stop()
         await rest_backfill.close()
+        await market_client.close()
+        if market_store is not None:
+            await market_store.close()
         await store.close()
         clear_app_state()
         NewsStreamWorker.reset_singleton()
+        StockStreamWorker.reset_singleton()
 
 
 async def _retention_loop(app_state: AppState) -> None:
@@ -112,6 +155,24 @@ async def _retention_loop(app_state: AppState) -> None:
             return
         except Exception as e:
             log.warning("retention pruning failed: %s", e)
+
+
+async def _market_retention_loop(app_state: AppState) -> None:
+    """Aggressive tick retention for the market DB (defaults: every 15 min)."""
+    assert app_state.market_store is not None
+    while True:
+        try:
+            await asyncio.sleep(app_state.config.market_retention_interval_seconds)
+            deleted = await app_state.market_store.prune(
+                tick_retention_minutes=app_state.config.stock_tick_retention_minutes,
+                bar_retention_days=app_state.config.stock_bar_retention_days,
+            )
+            if any(deleted.values()):
+                log.info("market retention pruned: %s", deleted)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("market retention pruning failed: %s", e)
 
 
 def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
@@ -164,6 +225,7 @@ async def healthz(request: Request) -> JSONResponse:
             "ok": True,
             "stream_connected": h.connected,
             "authenticated": h.authenticated,
+            "auth_failed": h.auth_failed,
             "subscription_mode": h.subscription_mode,
             "last_message_at": h.last_message_at,
             "last_article_at": h.last_article_at,
@@ -172,6 +234,18 @@ async def healthz(request: Request) -> JSONResponse:
             "connection_limit_blocked": h.connection_limit_blocked,
             "entitlement_error": h.entitlement_error,
         }
+        if app.stock_stream is not None:
+            sh = app.state.snapshot_health("stocks")
+            body["stocks"] = {
+                "stream_connected": sh.connected,
+                "authenticated": sh.authenticated,
+                "auth_failed": sh.auth_failed,
+                "last_message_at": sh.last_message_at,
+                "seconds_since_last_message": _seconds_since(sh.last_message_at),
+                "connection_limit_blocked": sh.connection_limit_blocked,
+                "entitlement_error": sh.entitlement_error,
+                "articles_dropped": sh.articles_dropped,
+            }
         return JSONResponse(body)
     except RuntimeError:
         return JSONResponse({"ok": False, "reason": "starting"}, status_code=503)

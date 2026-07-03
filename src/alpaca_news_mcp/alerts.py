@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -75,8 +76,90 @@ class _ArticleAlertContext:
 
 
 class AlertEngine:
-    def __init__(self, *, high_latency_alert_ms: int = 30_000) -> None:
+    def __init__(
+        self,
+        *,
+        high_latency_alert_ms: int = 30_000,
+        halt_alert_dedup_seconds: int = 300,
+    ) -> None:
         self.high_latency_alert_ms = high_latency_alert_ms
+        self.halt_alert_dedup_seconds = halt_alert_dedup_seconds
+        # (symbol, category) -> monotonic timestamp of last emitted alert
+        self._recent_market_alerts: dict[tuple[str, str], float] = {}
+
+    def _market_alert_deduped(self, symbol: str, category: str) -> bool:
+        """True when an identical (symbol, category) alert fired recently."""
+        now = time.monotonic()
+        key = (symbol.upper(), category)
+        last = self._recent_market_alerts.get(key)
+        if last is not None and now - last < self.halt_alert_dedup_seconds:
+            return True
+        self._recent_market_alerts[key] = now
+        return False
+
+    def status_alert(
+        self,
+        *,
+        symbol: str,
+        status_code: str | None,
+        status_msg: str | None,
+        reason_code: str | None,
+        reason_msg: str | None,
+        important: bool,
+    ) -> Alert | None:
+        """Trading-status change → trading_halt / trading_resume alert.
+        Returns None for uninteresting statuses or recent duplicates."""
+        code = (status_code or "").upper()
+        msg = (status_msg or "").lower()
+        if code == "H" or "halt" in msg or "pause" in msg:
+            category: AlertCategory = "trading_halt"
+            severity: Severity = "critical" if important else "high"
+        elif code in ("T", "R") or "resum" in msg or "trading" in msg:
+            category = "trading_resume"
+            severity = "medium"
+        else:
+            return None
+        if self._market_alert_deduped(symbol, category):
+            return None
+        detail = "; ".join(
+            p for p in (status_msg, reason_msg or reason_code) if p
+        ) or code
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity=severity,
+            category=category,
+            symbols=[symbol.upper()],
+            headline=None,
+            reason=f"{symbol.upper()} trading status: {detail}",
+            acknowledged=False,
+        )
+
+    def luld_alert(
+        self,
+        *,
+        symbol: str,
+        limit_up: float | None,
+        limit_down: float | None,
+        indicator: str | None,
+    ) -> Alert | None:
+        if self._market_alert_deduped(symbol, "luld"):
+            return None
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="medium",
+            category="luld",
+            symbols=[symbol.upper()],
+            headline=None,
+            reason=(
+                f"{symbol.upper()} LULD band update: "
+                f"limit_up={limit_up} limit_down={limit_down} indicator={indicator}"
+            ),
+            acknowledged=False,
+        )
 
     def evaluate_article(
         self,

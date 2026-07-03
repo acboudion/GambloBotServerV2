@@ -23,6 +23,9 @@ AlertCategory = Literal[
     "entitlement_error",
     "gap_fill_failure",
     "coverage_gap",
+    "trading_halt",
+    "trading_resume",
+    "luld",
 ]
 
 
