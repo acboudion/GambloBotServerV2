@@ -22,7 +22,7 @@ async def wired(tmp_path, monkeypatch):
     cfg = Config.from_env()
     store = await Store.open(cfg.storage_path)
     await store.init_schema()
-    state = State(max_recent_articles=cfg.max_recent_articles_memory)
+    state = State()
     alerts = AlertEngine()
     worker = RestBackfillWorker(cfg, store, state, alerts)
     yield worker, store, state, cfg
@@ -128,8 +128,8 @@ async def test_403_marks_entitlement_error(wired):
         result = await worker.backfill_startup()
 
     assert result["ingested"] == 0
-    assert state.stream_health.entitlement_error is True
-    assert "rest 403 forbidden" in (state.stream_health.last_error or "")
+    assert state.snapshot_health().entitlement_error is True
+    assert "rest 403 forbidden" in (state.snapshot_health().last_error or "")
 
 
 @pytest.mark.asyncio
@@ -153,8 +153,8 @@ async def test_429_retry_budget_aborts_to_avoid_infinite_loop(wired, monkeypatch
     # Bounded retry budget: must not be unbounded.
     assert route.call_count <= 10
     assert route.call_count >= 2
-    assert state.stream_health.last_error is not None
-    assert "429" in (state.stream_health.last_error or "")
+    assert state.snapshot_health().last_error is not None
+    assert "429" in (state.snapshot_health().last_error or "")
 
 
 @pytest.mark.asyncio

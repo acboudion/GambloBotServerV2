@@ -4,14 +4,14 @@ from alpaca_news_mcp.models import NewsArticle
 from alpaca_news_mcp.state import State
 
 
-def _article(id: int, *, latency_ms: int | None) -> NewsArticle:
+def _article(id: int, *, updated_at: str | None = None) -> NewsArticle:
     return NewsArticle(
         id=id,
         headline="h",
+        updated_at=updated_at,
         first_seen_at="2026-04-28T20:00:00+00:00",
         last_seen_at="2026-04-28T20:00:00+00:00",
         last_seen_source="ws",
-        latency_ms=latency_ms,
     )
 
 
@@ -19,33 +19,52 @@ def test_update_health_clears_nullable_field_with_none():
     """Passing `last_error=None` after recovery must actually clear the field;
     previously the None filter dropped the kwarg, so once an error was recorded
     health kept reporting it indefinitely."""
-    s = State(max_recent_articles=10)
+    s = State()
     s.update_health(last_error="boom")
-    assert s.stream_health.last_error == "boom"
+    assert s.snapshot_health().last_error == "boom"
 
     s.update_health(last_error=None)
-    assert s.stream_health.last_error is None
+    assert s.snapshot_health().last_error is None
 
 
 def test_update_health_omitted_keys_left_unchanged():
     """Omitting a kwarg must still leave the existing value alone."""
-    s = State(max_recent_articles=10)
+    s = State()
     s.update_health(last_error="boom", connected=True)
-    assert s.stream_health.last_error == "boom"
-    assert s.stream_health.connected is True
+    assert s.snapshot_health().last_error == "boom"
+    assert s.snapshot_health().connected is True
 
     s.update_health(connected=False)
-    assert s.stream_health.connected is False
-    assert s.stream_health.last_error == "boom"
+    assert s.snapshot_health().connected is False
+    assert s.snapshot_health().last_error == "boom"
 
 
-def test_record_article_skips_negative_latency():
-    """Clock skew between Alpaca's publisher and the host can produce a
-    negative latency_ms; those samples should not enter the latency window
-    or they drag avg/percentile metrics toward zero."""
-    s = State(max_recent_articles=10)
-    s.record_article(_article(1, latency_ms=100), was_new=True)
-    s.record_article(_article(2, latency_ms=-50), was_new=True)
-    s.record_article(_article(3, latency_ms=200), was_new=True)
-    s.record_article(_article(4, latency_ms=None), was_new=True)
-    assert list(s.latency_window) == [100, 200]
+def test_per_stream_health_is_independent():
+    s = State()
+    s.update_health("news", connected=True)
+    s.update_health("stocks", last_error="stock boom")
+    assert s.snapshot_health("news").connected is True
+    assert s.snapshot_health("news").last_error is None
+    assert s.snapshot_health("stocks").connected is False
+    assert s.snapshot_health("stocks").last_error == "stock boom"
+    assert s.snapshot_health("stocks").service == "alpaca-stock-stream"
+
+
+def test_record_article_drop_per_stream():
+    s = State()
+    assert s.record_article_drop("news") == 1
+    assert s.record_article_drop("news") == 2
+    assert s.record_article_drop("stocks") == 1
+    assert s.snapshot_health("news").articles_dropped == 2
+    assert s.snapshot_health("stocks").articles_dropped == 1
+
+
+def test_record_article_tracks_counts_and_last_seen():
+    s = State()
+    s.record_article(_article(1, updated_at="2026-04-28T20:00:00+00:00"), was_new=True)
+    s.record_article(_article(2, updated_at="2026-04-28T21:00:00+00:00"), was_new=True)
+    # Re-delivery of an older article must not regress last_seen_updated_at.
+    s.record_article(_article(1, updated_at="2026-04-28T20:00:00+00:00"), was_new=False)
+    assert s.article_count == 2
+    assert s.last_seen_updated_at == "2026-04-28T21:00:00+00:00"
+    assert s.snapshot_health().article_count == 2

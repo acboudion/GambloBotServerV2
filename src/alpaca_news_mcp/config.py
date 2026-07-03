@@ -74,7 +74,6 @@ class Config:
     rest_include_content: bool
     rest_exclude_contentless: bool
 
-    max_recent_articles_memory: int
     event_retention_days: int
     raw_event_retention_days: int
     retention_interval_seconds: int
@@ -125,7 +124,6 @@ class Config:
             rest_backfill_overlap_seconds=_get_int("REST_BACKFILL_OVERLAP_SECONDS", 180),
             rest_include_content=_get_bool("REST_INCLUDE_CONTENT", True),
             rest_exclude_contentless=_get_bool("REST_EXCLUDE_CONTENTLESS", False),
-            max_recent_articles_memory=_get_int("MAX_RECENT_ARTICLES_MEMORY", 5000),
             event_retention_days=_get_int("EVENT_RETENTION_DAYS", 14),
             raw_event_retention_days=_get_int("RAW_EVENT_RETENTION_DAYS", 7),
             retention_interval_seconds=_get_int("RETENTION_INTERVAL_SECONDS", 3600),

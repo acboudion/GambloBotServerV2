@@ -31,6 +31,9 @@ log = get_logger(__name__)
 
 AUTH_TIMEOUT_SECONDS = 10.0
 SUBSCRIPTION_TIMEOUT_SECONDS = 10.0
+# Max articles persisted per batch commit. News volume is low; this only
+# matters during backfill floods and reconnect bursts.
+PERSIST_BATCH_MAX = 64
 
 
 class SingletonViolation(RuntimeError):
@@ -136,7 +139,9 @@ class NewsStreamWorker:
                 except Exception as e:
                     log.warning("gap fill failed: %s", e)
 
-            self._state.update_health(reconnect_count=self._state.stream_health.reconnect_count + 1)
+            self._state.update_health(
+                reconnect_count=self._state.snapshot_health().reconnect_count + 1
+            )
 
     async def _connect_and_run(self) -> None:
         url = self._config.alpaca_news_stream_url
@@ -454,40 +459,76 @@ class NewsStreamWorker:
 
     async def _persister_loop(self) -> None:
         while True:
+            # Block for the first item, then drain whatever else is already
+            # queued (no waiting — batching must never add visibility latency
+            # for a single article; it only amortizes commits under bursts).
             try:
-                kind, payload = await self._queue.get()
+                batch = [await self._queue.get()]
             except asyncio.CancelledError:
                 return
+            while len(batch) < PERSIST_BATCH_MAX:
+                try:
+                    batch.append(self._queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
             try:
-                if kind == "n":
-                    await self._persist_article(payload)
+                await self._persist_batch([p for kind, p in batch if kind == "n"])
             except Exception as e:
                 log.exception("persister error: %s", e)
             finally:
-                self._queue.task_done()
+                for _ in batch:
+                    self._queue.task_done()
 
-    async def _persist_article(self, payload: dict[str, Any]) -> None:
-        try:
-            normalized = normalize_news_message(payload)
-        except NormalizationError as e:
-            log.warning("normalization failed: %s", e)
+    async def _persist_batch(self, payloads: list[dict[str, Any]]) -> None:
+        if not payloads:
+            return
+        # Normalization (BeautifulSoup HTML stripping) is pure CPU — run it off
+        # the event loop so a burst of long articles can't stall the recv loop.
+        normalized_items, bad_items = await asyncio.to_thread(
+            self._normalize_payloads, payloads
+        )
+
+        for payload, err in bad_items:
+            log.warning("normalization failed: %s", err)
             await self._store.record_raw_event(
                 endpoint="news_ws",
                 message_type="bad_article",
                 raw_json=orjson.dumps(payload).decode("utf-8"),
             )
-            return
 
-        result = await self._store.upsert_article(normalized, source_kind="ws")
-        self._state.record_article(result.article, was_new=result.was_new)
-        if result.was_new or result.version_inserted:
-            interest = self._state.get_interest_symbols()
-            for alert in self._alerts.evaluate_article(
-                result.article, interest_symbols=interest
-            ):
-                inserted = await self._store.record_alert(alert, raw_json=normalized.raw_json)
-                if inserted:
-                    self._state.record_alert(alert)
+        if not normalized_items:
+            return
+        interest = self._state.get_interest_symbols()
+        pending_alerts = []
+        async with self._store.batch_writer() as writer:
+            for normalized in normalized_items:
+                result = await writer.upsert_article(normalized, source_kind="ws")
+                self._state.record_article(result.article, was_new=result.was_new)
+                if result.was_new or result.version_inserted:
+                    for alert in self._alerts.evaluate_article(
+                        result.article, interest_symbols=interest
+                    ):
+                        inserted = await writer.record_alert(
+                            alert, raw_json=normalized.raw_json
+                        )
+                        if inserted:
+                            pending_alerts.append(alert)
+        # Count alerts only after the batch commit actually lands.
+        for alert in pending_alerts:
+            self._state.record_alert(alert)
+
+    @staticmethod
+    def _normalize_payloads(
+        payloads: list[dict[str, Any]],
+    ) -> tuple[list[Any], list[tuple[dict[str, Any], NormalizationError]]]:
+        ok: list[Any] = []
+        bad: list[tuple[dict[str, Any], NormalizationError]] = []
+        for payload in payloads:
+            try:
+                ok.append(normalize_news_message(payload))
+            except NormalizationError as e:
+                bad.append((payload, e))
+        return ok, bad
 
     @staticmethod
     def _parse_frame(raw: str | bytes) -> list[dict[str, Any]]:

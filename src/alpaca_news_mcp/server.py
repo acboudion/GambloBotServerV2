@@ -46,7 +46,7 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
     store = await Store.open(config.storage_path)
     await store.init_schema()
 
-    state = State(max_recent_articles=config.max_recent_articles_memory)
+    state = State()
     state.set_interest_symbols(config.news_interest_symbols, "replace")
 
     alerts = AlertEngine(high_latency_alert_ms=config.high_latency_alert_ms)

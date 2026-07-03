@@ -24,7 +24,7 @@ async def app(tmp_path, monkeypatch):
     cfg = Config.from_env()
     store = await Store.open(cfg.storage_path)
     await store.init_schema()
-    state = State(max_recent_articles=cfg.max_recent_articles_memory)
+    state = State()
     state.set_interest_symbols(cfg.news_interest_symbols, "replace")
     alerts = AlertEngine()
     rest = RestBackfillWorker(cfg, store, state, alerts)
