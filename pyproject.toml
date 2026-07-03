@@ -12,7 +12,9 @@ authors = [{ name = "alpaca-news-mcp" }]
 license = { text = "MIT" }
 dependencies = [
   "mcp[cli]>=1.0.0",
-  "websockets>=13.0",
+  # >=14: top-level connect() is the asyncio client (additional_headers kwarg);
+  # 13.x's legacy client takes extra_headers and would crash at connect time.
+  "websockets>=14.0",
   "httpx>=0.27.0",
   "aiosqlite>=0.20.0",
   "pydantic>=2.8.0",

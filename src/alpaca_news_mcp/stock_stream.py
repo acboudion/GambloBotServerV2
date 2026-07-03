@@ -344,8 +344,9 @@ class StockStreamWorker(BaseStreamWorker):
             self._state.update_health(self.stream_name, last_error=f"{code} {msg}")
 
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
-        if kind in ("s", "l"):
-            # Halts/LULDs are rare, audit-preserved, and alert-critical — a
+        if kind in ("s", "l", "raw"):
+            # Halts/LULDs/raw audit events (corrections, cancelErrors,
+            # unknowns) are rare, audit-preserved, and alert-relevant — a
             # quote burst overflowing the queue must not lose them. Persist
             # directly, bypassing the queue (persist_batch also emits alerts).
             try:

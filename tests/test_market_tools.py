@@ -92,6 +92,14 @@ async def test_latest_market_data_memory_path(app):
     assert out["symbols"]["AAPL"]["quote"]["bp"] == 190.4
     assert out["missing"] == ["MSFT"]
     assert out["source"] == "stream"
+    # AAPL's stream snapshot has no minute bar yet — a partial stream entry
+    # must be reported, not silently returned as if complete.
+    assert out["missing_fields"] == {"AAPL": ["bar"]}
+
+    # status/luld are event-driven; their absence is not a missing field.
+    ev = await _call(mcp, "get_latest_market_data", symbols=["AAPL"],
+                     include=["trade", "status"])
+    assert ev["missing_fields"] == {}
 
     bad = await _call(mcp, "get_latest_market_data", symbols=["AAPL"], include=["bogus"])
     assert bad["error"] == "invalid_include"
@@ -310,7 +318,8 @@ async def test_latest_market_data_rest_fallback(app_with_client):
     assert out["symbols"]["AAPL"]["trade"]["p"] == 190.5
     assert out["symbols"]["MSFT"]["trade"]["p"] == 400.0
     assert out["missing"] == []
-    assert out["missing_fields"] == {}
+    # MSFT was fully filled by REST; AAPL's stream snapshot only has a trade.
+    assert out["missing_fields"] == {"AAPL": ["bar", "quote"]}
     assert out["source"] == "stream+rest"
 
 

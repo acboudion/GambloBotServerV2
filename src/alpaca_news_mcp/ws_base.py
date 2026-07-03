@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 import orjson
-import websockets
+from websockets.asyncio.client import connect as ws_connect
 from websockets.exceptions import ConnectionClosed
 
 from .alerts import AlertEngine
@@ -308,7 +308,10 @@ class BaseStreamWorker:
     async def _connect_and_run(self) -> None:
         url = self.stream_url()
         log.info("connecting to alpaca %s stream", self.stream_name)
-        async with websockets.connect(
+        # Explicitly the asyncio client: the top-level websockets.connect alias
+        # resolved to the legacy client (extra_headers, no additional_headers)
+        # before 14.0.
+        async with ws_connect(
             url,
             additional_headers=self.connect_headers(),
             ping_interval=20,

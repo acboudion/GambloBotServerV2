@@ -463,12 +463,20 @@ async def test_dropped_status_and_luld_are_persisted_not_lost(wired):
 
     await worker.on_dropped_item("s", _status("AAPL"))
     await worker.on_dropped_item("l", _luld("AAPL"))
+    await worker.on_dropped_item("raw", {"T": "correction", "S": "AAPL", "x": "V"})
     # The halt survived: persisted + alerted, and not counted as dropped.
     assert len(await market_store.recent_statuses(minutes=10**6)) == 1
     assert len(await market_store.recent_lulds(minutes=10**6)) == 1
     halts = await store.get_alerts(minutes=5, categories=["trading_halt"], limit=10)
     assert len(halts) == 1 and halts[0].severity == "critical"
     assert state.snapshot_health("stocks").articles_dropped == 0
+    # The dropped correction also reached the raw audit table.
+    cur = await market_store.conn.execute(
+        "SELECT message_type FROM market_raw_events ORDER BY message_type"
+    )
+    kinds = [r["message_type"] for r in await cur.fetchall()]
+    await cur.close()
+    assert kinds == ["correction", "l", "s"]
 
     # A dropped trade is just counted.
     await worker.on_dropped_item("t", _trade())
