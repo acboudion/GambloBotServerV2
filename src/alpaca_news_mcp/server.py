@@ -187,8 +187,11 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
     mcp = FastMCP(
         name="alpaca-news-mcp",
         instructions=(
-            "Real-time Alpaca news ingestion with bounded read-only MCP tools. "
-            "Single Alpaca WS connection per container."
+            "Real-time Alpaca market data: news stream + v2 stock stream "
+            "(trades/quotes/bars/halts) with bounded read-only MCP tools. "
+            "Prefer the delta-cursor tools (get_news_since, get_alerts_since, "
+            "get_bars_since) for polling loops. One Alpaca WS per endpoint per "
+            "container; no trading endpoints."
         ),
         json_response=True,
         stateless_http=True,
