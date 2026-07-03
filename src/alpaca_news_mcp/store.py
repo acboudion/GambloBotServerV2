@@ -129,12 +129,17 @@ class Store:
         and pays a single fsync instead of one per row.
         """
         async with self._write_lock:
+            # The commit itself must be inside the rollback guard: a commit
+            # failure (SQLITE_BUSY, I/O error) would otherwise leave the
+            # transaction open, and a later unrelated write would commit this
+            # "failed" batch's rows after the persister already discarded its
+            # pending alert quota/state.
             try:
                 yield BatchWriter(self)
+                await self.conn.commit()
             except BaseException:
                 await self.conn.rollback()
                 raise
-            await self.conn.commit()
 
     async def _upsert_article_locked(
         self,

@@ -449,12 +449,22 @@ class StockStreamWorker(BaseStreamWorker):
         for kind, item in batch:
             symbol = str(item.get("S") or "").upper()
             ts_us = _to_epoch_us(item.get("t"))
-            if kind == "t" and symbol and ts_us is not None:
+            price = item.get("p")
+            # A trade needs a real numeric price — coercing a missing/null
+            # price to 0.0 would plant fake zero trades in the tick series.
+            # Malformed frames fall through to the raw audit path instead.
+            if (
+                kind == "t"
+                and symbol
+                and ts_us is not None
+                and isinstance(price, (int, float))
+                and not isinstance(price, bool)
+            ):
                 trades.append(
                     (
                         symbol,
                         ts_us,
-                        float(item.get("p") or 0.0),
+                        float(price),
                         item.get("s"),
                         item.get("x"),
                         _conditions_str(item.get("c")),

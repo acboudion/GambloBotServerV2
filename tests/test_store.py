@@ -384,3 +384,27 @@ async def test_alert_cross_source_dedup_by_content_hash(open_store):
     # Direction round-trips through get_alerts.
     alerts = await open_store.get_alerts(minutes=5, limit=10)
     assert all(a.direction == "neutral" for a in alerts)
+
+
+@pytest.mark.asyncio
+async def test_batch_writer_rolls_back_when_commit_fails(open_store, monkeypatch):
+    """A commit failure (SQLITE_BUSY / I/O) must roll back — an open
+    transaction would let a later unrelated write commit this failed batch."""
+    import sqlite3
+
+    async def failing_commit():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(open_store.conn, "commit", failing_commit)
+    with pytest.raises(sqlite3.OperationalError):
+        async with open_store.batch_writer() as w:
+            await w.upsert_article(
+                normalize_news_message(_payload(3000)), source_kind="ws"
+            )
+    monkeypatch.undo()
+    # A later successful write must not resurrect the failed batch's rows.
+    await open_store.upsert_article(
+        normalize_news_message(_payload(3001)), source_kind="ws"
+    )
+    assert await open_store.get_article(3000) is None
+    assert await open_store.get_article(3001) is not None

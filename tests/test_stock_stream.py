@@ -652,3 +652,26 @@ async def test_watchdog_inert_for_event_only_channels(wired):
     worker2 = _worker(cfg_chatty, store, market_store, state, alerts,
                       market_client=_FakeMarketClient())
     assert await worker2.watchdog_should_fire() is True
+
+
+@pytest.mark.asyncio
+async def test_trade_without_price_routes_to_raw_not_tick_series(wired):
+    """A trade frame missing `p` (or with a null price) must not persist as a
+    fake 0.0 trade — it goes to the raw audit table instead."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    no_price = _trade()
+    del no_price["p"]
+    null_price = _trade()
+    null_price["p"] = None
+    await worker.persist_batch([("t", no_price), ("t", null_price)])
+    assert await market_store.trades_window("AAPL", since_us=0, limit=10) == []
+    cur = await market_store.conn.execute(
+        "SELECT COUNT(*) FROM market_raw_events WHERE message_type = 't'"
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    assert row[0] == 2
+    # A real trade still lands.
+    await worker.persist_batch([("t", _trade())])
+    assert len(await market_store.trades_window("AAPL", since_us=0, limit=10)) == 1
