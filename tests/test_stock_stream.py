@@ -585,3 +585,24 @@ async def test_gap_fill_disabled_without_bar_channels(wired):
     worker2 = _worker(cfg_updated_only, store, market_store, state, alerts,
                       market_client=client)
     assert worker2._gap_fill is not None
+
+
+@pytest.mark.asyncio
+async def test_malformed_timestamp_frame_does_not_clobber_snapshot(wired):
+    """A frame with a missing/unparseable `t` isn't persisted as a flattened
+    row — it must not overwrite the latest snapshot either (the cache can't
+    order a None timestamp, so the malformed frame would win)."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    await worker.persist_batch([("t", _trade(price=190.5))])
+    assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5
+
+    bad = _trade(price=1.0)
+    bad["t"] = "garbage"
+    await worker.persist_batch([("t", bad)])
+    snap = market_store.snapshots.get("AAPL")
+    assert snap["trade"]["p"] == 190.5  # good latest survived
+    no_ts = _trade(price=2.0)
+    del no_ts["t"]
+    await worker.persist_batch([("t", no_ts)])
+    assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5

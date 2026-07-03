@@ -539,6 +539,12 @@ class StockStreamWorker(BaseStreamWorker):
             if slot is None or not symbol:
                 continue
             ts_us = _to_epoch_us(item.get("t"))
+            if ts_us is None:
+                # Frames without a parseable timestamp aren't persisted as
+                # flattened rows (they route to market_raw_events) — they must
+                # not overwrite a good latest snapshot either: the cache can't
+                # order a None timestamp, so a malformed frame would win.
+                continue
             snap = {
                 k: v for k, v in item.items() if k not in ("T", "S")
             }
