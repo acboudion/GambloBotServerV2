@@ -23,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
+from . import market_tools as market_tools_mod
 from . import resources as resources_mod
 from . import tools as tools_mod
 from .alerts import AlertEngine
@@ -193,6 +194,8 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
     )
     tools_mod.register(mcp)
     resources_mod.register(mcp)
+    market_tools_mod.register(mcp)
+    market_tools_mod.register_resources(mcp)
     return mcp
 
 
