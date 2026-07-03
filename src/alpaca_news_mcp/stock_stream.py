@@ -113,9 +113,30 @@ class StockStreamWorker(BaseStreamWorker):
         self._market_store = market_store
         self._market_client = market_client
         self._channels: list[str] = list(config.stock_channels)
-        self._watchlist: set[str] = {s.upper() for s in config.stock_watchlist_symbols}
+        self._watchlist: set[str] = self._cap_watchlist(
+            {s.upper() for s in config.stock_watchlist_symbols}, source="configured"
+        )
         self._acknowledged: dict[str, list[str]] | None = None
         self._watchlist_lock = asyncio.Lock()
+
+    @staticmethod
+    def _cap_watchlist(symbols: set[str], *, source: str) -> set[str]:
+        """update_watchlist rejects oversized requests outright; the startup
+        paths (env config / restored state) clamp instead — an oversized
+        subscribe would hit Alpaca's symbol limit and leave the stream with no
+        valid acknowledged subscription at all. Deterministic: keeps the first
+        MAX_WATCHLIST_SYMBOLS in sorted order."""
+        if len(symbols) <= MAX_WATCHLIST_SYMBOLS:
+            return symbols
+        kept = set(sorted(symbols)[:MAX_WATCHLIST_SYMBOLS])
+        log.warning(
+            "%s watchlist has %d symbols; capped to %d (dropped: %s)",
+            source,
+            len(symbols),
+            MAX_WATCHLIST_SYMBOLS,
+            ",".join(sorted(symbols - kept)),
+        )
+        return kept
 
     # ---- watchlist -------------------------------------------------------------
 
@@ -134,9 +155,10 @@ class StockStreamWorker(BaseStreamWorker):
         cleared the stream must not get the config default back on restart."""
         persisted = await self._store.get_status(WATCHLIST_STATUS_KEY)
         if persisted and isinstance(persisted.get("symbols"), list):
-            symbols = {
-                str(s).upper() for s in persisted["symbols"] if str(s).strip()
-            }
+            symbols = self._cap_watchlist(
+                {str(s).upper() for s in persisted["symbols"] if str(s).strip()},
+                source="restored",
+            )
             self._watchlist = symbols
             log.info("restored stock watchlist: %s", sorted(symbols) or "(empty)")
 

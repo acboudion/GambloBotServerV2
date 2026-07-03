@@ -606,3 +606,21 @@ async def test_malformed_timestamp_frame_does_not_clobber_snapshot(wired):
     del no_ts["t"]
     await worker.persist_batch([("t", no_ts)])
     assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5
+
+
+@pytest.mark.asyncio
+async def test_oversized_startup_watchlist_is_capped(wired):
+    """An env/persisted watchlist over MAX_WATCHLIST_SYMBOLS must be clamped
+    before the first subscribe — an oversized request would hit Alpaca's
+    symbol limit and leave the stream with no acknowledged subscription."""
+    cfg, store, market_store, state, alerts = wired
+    big = [f"S{i:03d}" for i in range(120)]
+    cfg_big = replace(cfg, stock_watchlist_symbols=big)
+    worker = _worker(cfg_big, store, market_store, state, alerts)
+    assert len(worker.watchlist()) == 100
+    assert worker.watchlist() == sorted(big)[:100]
+
+    # The restored path clamps too (e.g. state written by an older build).
+    await store.set_status("stock_watchlist", {"symbols": big})
+    await worker.restore_watchlist()
+    assert len(worker.watchlist()) == 100
