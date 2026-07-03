@@ -23,6 +23,7 @@ MAX_VERSIONS_DEFAULT = 50
 MAX_VERSIONS_HARD = 200
 MAX_CONTENT_CHARS = 4000
 MAX_CURSOR_ITEMS = 500
+MAX_SYMBOLS_PER_LOOKUP = 50
 
 VALID_FIELD_MODES = ("compact", "standard", "full")
 
@@ -275,6 +276,11 @@ def register(mcp: FastMCP) -> None:
     ) -> dict[str, Any]:
         if not symbols:
             return {"error": "no_symbols"}
+        # One query per symbol and up to limit_per_symbol rows each — an
+        # unbounded symbol list would multiply past the bounded-response
+        # contract (500 symbols x 25 = 12,500 articles).
+        if len(symbols) > MAX_SYMBOLS_PER_LOOKUP:
+            return _limit_exceeded(MAX_SYMBOLS_PER_LOOKUP, len(symbols))
         if limit_per_symbol > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit_per_symbol)
         if fields not in VALID_FIELD_MODES:

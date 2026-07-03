@@ -307,3 +307,17 @@ async def test_get_breaking_news_digest_clamps_non_positive_max(app, bad_max):
     out = await _call(mcp, "get_breaking_news_digest", minutes=60, max_articles=bad_max)
     assert "error" not in out
     assert len(out["articles"]) <= 1
+
+
+@pytest.mark.asyncio
+async def test_get_news_for_symbols_caps_symbol_count(app):
+    """One query per symbol x limit_per_symbol rows each — an unbounded
+    symbol list would multiply past the bounded-response contract."""
+    mcp = build_mcp()
+    out = await _call(
+        mcp, "get_news_for_symbols", symbols=[f"S{i}" for i in range(51)]
+    )
+    assert out["error"] == "limit_exceeded"
+    assert out["max_allowed"] == 50
+    ok = await _call(mcp, "get_news_for_symbols", symbols=["AAPL"])
+    assert "symbols" in ok

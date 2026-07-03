@@ -375,3 +375,21 @@ def test_pending_charges_enforce_quota_within_a_batch():
         _mk_article(id=4, headline="Analyst upgrade after"), interest_symbols=set()
     )
     assert not any(a.category == "analyst_keyword" for a in after)
+
+
+def test_breaking_marker_with_trailing_punctuation_matches():
+    """Phrases ending in punctuation ("alert:") must match in real headlines
+    like "Alert: ..." — a trailing \\b after the colon would require a word
+    character next and never fire before a space."""
+    engine = _Engine()
+    out = engine.evaluate_article(
+        _mk_article(headline="Alert: unusual volume in shares"),
+        interest_symbols=set(),
+    )
+    assert any(a.category == "breaking_keyword" for a in out)
+    # The word-char guard still applies: "sec" must not match inside "secured".
+    none = engine.evaluate_article(
+        _mk_article(id=2, headline="Company secured a new deal"),
+        interest_symbols=set(),
+    )
+    assert not any("sec" in a.reason for a in none)

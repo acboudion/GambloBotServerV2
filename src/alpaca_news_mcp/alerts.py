@@ -93,10 +93,19 @@ def _utcnow_iso() -> str:
 
 
 def _compile_phrases(phrases: list[str]) -> list[tuple[str, re.Pattern[str]]]:
-    # word-boundary-ish match: avoid matching "secured" for "sec"
-    return [
-        (p, re.compile(r"\b" + re.escape(p.lower()) + r"\b")) for p in phrases
-    ]
+    # Word-boundary-ish match (avoid matching "secured" for "sec") — but only
+    # guard edges that are themselves word characters: a phrase ending in
+    # punctuation ("alert:") would otherwise need a word char right after the
+    # colon, so "Alert: headline" (colon then space) could never match.
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    for p in phrases:
+        lowered = p.lower()
+        if not lowered:
+            continue
+        prefix = r"\b" if re.match(r"\w", lowered[0]) else ""
+        suffix = r"\b" if re.match(r"\w", lowered[-1]) else ""
+        compiled.append((p, re.compile(prefix + re.escape(lowered) + suffix)))
+    return compiled
 
 
 def _match_compiled(
