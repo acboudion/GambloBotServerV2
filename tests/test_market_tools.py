@@ -278,7 +278,7 @@ async def test_market_clock_and_calendar_tools(app_with_client):
 @respx.mock
 async def test_corporate_actions_tool(app_with_client):
     mcp = build_mcp()
-    respx.get("https://data.alpaca.markets/v1beta1/corporate-actions").mock(
+    respx.get("https://data.alpaca.markets/v1/corporate-actions").mock(
         return_value=httpx.Response(
             200,
             json={"corporate_actions": {"forward_splits": [{"symbol": "NVDA"}]},

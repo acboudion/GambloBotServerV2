@@ -419,6 +419,12 @@ class StockStreamWorker(BaseStreamWorker):
                     )
                 )
                 status_items.append(item)
+                # Statuses/LULDs are rare and audit-critical (they drive halt
+                # alerts) — keep the original payload alongside the flattened
+                # row. High-volume ticks (t/q/b) stay flattened only: the
+                # columns are lossless for documented fields and raw copies
+                # would multiply write volume.
+                raw.append(("s", orjson.dumps(item, default=str).decode("utf-8")))
             elif kind == "l" and symbol and ts_us is not None:
                 lulds.append(
                     (
@@ -431,6 +437,7 @@ class StockStreamWorker(BaseStreamWorker):
                     )
                 )
                 luld_items.append(item)
+                raw.append(("l", orjson.dumps(item, default=str).decode("utf-8")))
             else:
                 raw.append(
                     (

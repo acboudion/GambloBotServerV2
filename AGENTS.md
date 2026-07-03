@@ -28,7 +28,11 @@ Implementation requirements:
   bounded queues, drain-batched persistence (executemany + single commit),
   idle watchdog, backoff reset after stable sessions.
 - Bounded MCP tool responses with structured errors ({"error": ...}).
-- Preserve raw Alpaca messages; strip/sanitize article HTML off the event loop.
+- Preserve raw Alpaca messages for news and for low-volume stock messages
+  (statuses/LULDs, corrections, cancelErrors, unknown types). High-volume
+  ticks (trades/quotes/bars) are flattened losslessly into columns instead —
+  raw copies at full quote depth would multiply write volume for no signal.
+- Strip/sanitize article HTML off the event loop.
 - Schema changes go through migrations.py (PRAGMA user_version); schema.sql /
   market_schema.sql describe the final shape with IF NOT EXISTS only.
 - Never log or expose Alpaca credentials.

@@ -103,7 +103,7 @@ async def test_latest_and_corporate_actions(client):
     with pytest.raises(ValueError):
         await client.latest("bogus", ["MSFT"])
 
-    respx.get("https://data.alpaca.markets/v1beta1/corporate-actions").mock(
+    respx.get("https://data.alpaca.markets/v1/corporate-actions").mock(
         return_value=httpx.Response(
             200,
             json={"corporate_actions": {"forward_splits": [{"symbol": "NVDA", "new_rate": 10}]}},

@@ -318,3 +318,28 @@ async def test_full_happy_path_over_fake_ws_json(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_statuses_and_lulds_keep_raw_payloads_ticks_do_not(wired):
+    """Audit policy: raw payloads preserved for statuses/LULDs (rare,
+    alert-driving) but not for high-volume ticks (flattened losslessly)."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    await worker.persist_batch([
+        ("t", _trade()),
+        ("q", _quote()),
+        ("b", _bar()),
+        ("s", _status()),
+        ("l", _luld()),
+    ])
+    cur = await market_store.conn.execute(
+        "SELECT message_type, raw_json FROM market_raw_events ORDER BY message_type"
+    )
+    rows = [(r["message_type"], orjson.loads(r["raw_json"])) for r in await cur.fetchall()]
+    await cur.close()
+    assert [mt for mt, _ in rows] == ["l", "s"]
+    luld_raw = dict(rows)["l"]
+    status_raw = dict(rows)["s"]
+    assert status_raw["sc"] == "H" and status_raw["S"] == "AAPL"
+    assert luld_raw["u"] == 200.0

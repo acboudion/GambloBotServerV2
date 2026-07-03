@@ -33,7 +33,7 @@ LATEST_PATHS = {
     "quotes": "/v2/stocks/quotes/latest",
     "bars": "/v2/stocks/bars/latest",
 }
-CORPORATE_ACTIONS_PATH = "/v1beta1/corporate-actions"
+CORPORATE_ACTIONS_PATH = "/v1/corporate-actions"
 
 MAX_BARS_PAGES = 40
 
