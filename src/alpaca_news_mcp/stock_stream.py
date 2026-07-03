@@ -335,6 +335,20 @@ class StockStreamWorker(BaseStreamWorker):
             self._state.update_health(self.stream_name, last_error=f"{code} {msg}")
 
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
+        if kind in ("s", "l"):
+            # Halts/LULDs are rare, audit-preserved, and alert-critical — a
+            # quote burst overflowing the queue must not lose them. Persist
+            # directly, bypassing the queue (persist_batch also emits alerts).
+            try:
+                await self.persist_batch([(kind, item)])
+                log.warning(
+                    "stock queue overflow: persisted %s for %s directly",
+                    kind,
+                    item.get("S"),
+                )
+                return
+            except Exception as e:
+                log.exception("direct persist of dropped %s failed: %s", kind, e)
         dropped = self._state.record_article_drop(self.stream_name)
         if dropped == 1 or dropped % 1000 == 0:
             log.warning(

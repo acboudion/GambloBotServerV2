@@ -143,3 +143,22 @@ async def test_bars_page_failure_raises_instead_of_partial_success(client):
     ]
     with pytest.raises(MarketDataError):
         await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_bars_pagination_truncation_raises(client, monkeypatch):
+    """Hitting the page cap with a next_page_token still set means data
+    remains — must raise, not silently return the partial result."""
+    import alpaca_news_mcp.market_client as mc
+
+    monkeypatch.setattr(mc, "MAX_BARS_PAGES", 1)
+    respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bars": {"AAPL": [{"t": "2026-07-02T13:30:00Z", "c": 1.0}]},
+                  "next_page_token": "more"},
+        )
+    )
+    with pytest.raises(mc.MarketDataError, match="truncated"):
+        await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z")

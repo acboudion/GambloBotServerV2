@@ -301,4 +301,12 @@ class MarketDataClient:
             page_token = payload.get("next_page_token") or None
             if not page_token:
                 break
+        if page_token:
+            # Page cap hit with more data remaining (very long disconnect with
+            # a large watchlist). Treat as incomplete so the caller retries /
+            # alerts rather than silently missing the tail.
+            raise MarketDataError(
+                f"bars pagination truncated at {pages} pages with data remaining "
+                f"(timeframe={timeframe}, start={start_iso})"
+            )
         return out

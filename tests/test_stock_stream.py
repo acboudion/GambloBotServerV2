@@ -452,3 +452,26 @@ async def test_reconnect_clears_stale_subscription_ack(wired):
     # Ack from the new session repopulates it.
     await worker.handle_item(FakeWS(), {"T": "subscription", "trades": ["AAPL", "TSLA"]})
     assert worker.acknowledged_subscription() == {"trades": ["AAPL", "TSLA"]}
+
+
+@pytest.mark.asyncio
+async def test_dropped_status_and_luld_are_persisted_not_lost(wired):
+    """Queue-overflow drops must not lose halts/LULDs: they are persisted
+    (and alerted) directly, bypassing the queue. Ticks stay expendable."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+
+    await worker.on_dropped_item("s", _status("AAPL"))
+    await worker.on_dropped_item("l", _luld("AAPL"))
+    # The halt survived: persisted + alerted, and not counted as dropped.
+    assert len(await market_store.recent_statuses(minutes=10**6)) == 1
+    assert len(await market_store.recent_lulds(minutes=10**6)) == 1
+    halts = await store.get_alerts(minutes=5, categories=["trading_halt"], limit=10)
+    assert len(halts) == 1 and halts[0].severity == "critical"
+    assert state.snapshot_health("stocks").articles_dropped == 0
+
+    # A dropped trade is just counted.
+    await worker.on_dropped_item("t", _trade())
+    assert state.snapshot_health("stocks").articles_dropped == 1
+    since_us = _to_epoch_us("2026-04-28T00:00:00Z")
+    assert await market_store.trades_window("AAPL", since_us=since_us, limit=10) == []
