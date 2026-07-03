@@ -38,9 +38,8 @@ log = get_logger(__name__)
 
 
 @asynccontextmanager
-async def app_setup() -> AsyncIterator[AppState]:
+async def app_setup(config: Config) -> AsyncIterator[AppState]:
     """Initialize Alpaca workers, store, and shared state. Single global instance."""
-    config = Config.from_env()
     configure_logging(config.log_level)
     log.info("alpaca-news-mcp starting (safe config: %s)", config.safe_repr())
 
@@ -98,10 +97,13 @@ async def app_setup() -> AsyncIterator[AppState]:
 
 
 async def _retention_loop(app_state: AppState) -> None:
-    """Once-an-hour retention pruner."""
+    """Periodic retention pruner. Runs once at startup, then on the configured cadence."""
+    first_run = True
     while True:
         try:
-            await asyncio.sleep(3600)
+            if not first_run:
+                await asyncio.sleep(app_state.config.retention_interval_seconds)
+            first_run = False
             await app_state.store.prune_retention(
                 event_days=app_state.config.event_retention_days,
                 raw_event_days=app_state.config.raw_event_retention_days,
@@ -175,7 +177,7 @@ async def healthz(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "reason": "starting"}, status_code=503)
 
 
-def build_starlette_app(mcp: FastMCP) -> Starlette:
+def build_starlette_app(mcp: FastMCP, config: Config) -> Starlette:
     """Build the parent Starlette app.
 
     Runs both our app-level setup AND FastMCP's StreamableHTTP session manager
@@ -190,7 +192,7 @@ def build_starlette_app(mcp: FastMCP) -> Starlette:
 
     @asynccontextmanager
     async def combined_lifespan(_parent: Starlette) -> AsyncIterator[None]:
-        async with app_setup():
+        async with app_setup(config):
             async with session_manager.run():
                 yield
 

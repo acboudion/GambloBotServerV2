@@ -13,7 +13,7 @@ def main() -> None:
     cfg = Config.from_env()
     configure_logging(cfg.log_level)
     mcp = build_mcp(mcp_path=cfg.mcp_path)
-    app = build_starlette_app(mcp)
+    app = build_starlette_app(mcp, cfg)
 
     uvicorn.run(
         app,

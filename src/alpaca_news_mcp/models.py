@@ -72,7 +72,6 @@ class SubscriptionState(BaseModel):
     acknowledged: dict[str, list[str]] | None = None
     mode: Literal["wildcard", "fallback", "rest_only", "disconnected"] = "disconnected"
     last_ack_at: str | None = None
-    notes: str | None = None
 
 
 class StreamHealth(BaseModel):
@@ -112,9 +111,3 @@ class IngestionStats(BaseModel):
     distinct_symbols: int
     distinct_sources: int
     raw_event_count: int
-
-
-class LimitExceededError(BaseModel):
-    error: Literal["limit_exceeded"] = "limit_exceeded"
-    max_allowed: int
-    requested: int

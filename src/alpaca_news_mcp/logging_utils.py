@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Any
 
 
 class SecretRedactingFilter(logging.Filter):
@@ -55,9 +54,3 @@ def configure_logging(level: str = "info") -> None:
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
-
-
-def log_event(logger: logging.Logger, level: str, **fields: Any) -> None:
-    """Emit a structured single-line log."""
-    parts = " ".join(f"{k}={v}" for k, v in fields.items())
-    getattr(logger, level)(parts)

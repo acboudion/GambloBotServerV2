@@ -75,9 +75,9 @@ class Config:
     rest_exclude_contentless: bool
 
     max_recent_articles_memory: int
-    max_raw_events_memory: int
     event_retention_days: int
     raw_event_retention_days: int
+    retention_interval_seconds: int
 
     reconnect_min_seconds: int
     reconnect_max_seconds: int
@@ -88,7 +88,6 @@ class Config:
     queue_backpressure_seconds: float
 
     enable_manual_rest_backfill: bool
-    mcp_read_only: bool
 
     high_latency_alert_ms: int = 30_000
 
@@ -127,9 +126,9 @@ class Config:
             rest_include_content=_get_bool("REST_INCLUDE_CONTENT", True),
             rest_exclude_contentless=_get_bool("REST_EXCLUDE_CONTENTLESS", False),
             max_recent_articles_memory=_get_int("MAX_RECENT_ARTICLES_MEMORY", 5000),
-            max_raw_events_memory=_get_int("MAX_RAW_EVENTS_MEMORY", 2000),
             event_retention_days=_get_int("EVENT_RETENTION_DAYS", 14),
             raw_event_retention_days=_get_int("RAW_EVENT_RETENTION_DAYS", 7),
+            retention_interval_seconds=_get_int("RETENTION_INTERVAL_SECONDS", 3600),
             reconnect_min_seconds=_get_int("RECONNECT_MIN_SECONDS", 5),
             reconnect_max_seconds=_get_int("RECONNECT_MAX_SECONDS", 120),
             connection_limit_backoff_seconds=_get_int("CONNECTION_LIMIT_BACKOFF_SECONDS", 90),
@@ -137,7 +136,6 @@ class Config:
             slow_client_warning_queue_depth=_get_int("SLOW_CLIENT_WARNING_QUEUE_DEPTH", 7500),
             queue_backpressure_seconds=_get_float("QUEUE_BACKPRESSURE_SECONDS", 2.0),
             enable_manual_rest_backfill=_get_bool("ENABLE_MANUAL_REST_BACKFILL", True),
-            mcp_read_only=_get_bool("MCP_READ_ONLY", True),
             high_latency_alert_ms=_get_int("HIGH_LATENCY_ALERT_MS", 30_000),
         )
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,22 +34,6 @@ class NormalizedArticle:
     latency_ms: int | None
     content_hash: str
     is_content_present: bool
-    extra_fields: dict[str, Any] = field(default_factory=dict)
-
-
-_KNOWN_FIELDS = {
-    "T",
-    "id",
-    "headline",
-    "summary",
-    "author",
-    "created_at",
-    "updated_at",
-    "content",
-    "url",
-    "symbols",
-    "source",
-}
 
 
 def _strip_html(html: str | None) -> str | None:
@@ -180,7 +164,6 @@ def normalize_news_message(payload: dict[str, Any]) -> NormalizedArticle:
     is_content_present = bool(content_html and content_html.strip())
     raw_json = orjson.dumps(payload).decode("utf-8")
     digest = _content_hash(headline, summary, content_html)
-    extras = {k: v for k, v in payload.items() if k not in _KNOWN_FIELDS}
 
     return NormalizedArticle(
         id=article_id,
@@ -199,7 +182,6 @@ def normalize_news_message(payload: dict[str, Any]) -> NormalizedArticle:
         latency_ms=latency_ms,
         content_hash=digest,
         is_content_present=is_content_present,
-        extra_fields=extras,
     )
 
 

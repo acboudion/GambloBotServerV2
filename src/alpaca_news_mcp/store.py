@@ -6,7 +6,6 @@ import asyncio
 import json
 import statistics
 import uuid
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -740,14 +739,3 @@ class Store:
             is_content_present=bool(row["is_content_present"]),
             raw=raw,
         )
-
-
-def chunked(iterable: Iterable[Any], n: int) -> Iterable[list[Any]]:
-    buf: list[Any] = []
-    for item in iterable:
-        buf.append(item)
-        if len(buf) >= n:
-            yield buf
-            buf = []
-    if buf:
-        yield buf
