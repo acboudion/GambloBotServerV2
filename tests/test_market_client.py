@@ -224,3 +224,14 @@ async def test_429_with_http_date_retry_after_does_not_crash(client):
     ]
     out = await client.movers(top=5)
     assert out == {"gainers": [], "losers": []}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_non_json_body_returns_none_not_exception(client):
+    """HTTP 200 with a non-JSON body must surface as an upstream failure
+    (None), not a JSONDecodeError out of the MCP tool."""
+    respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers").mock(
+        return_value=httpx.Response(200, text="<html>gateway error</html>")
+    )
+    assert await client.movers(top=5) is None

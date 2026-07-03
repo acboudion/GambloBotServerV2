@@ -390,3 +390,15 @@ async def test_manual_skipped_by_concurrent_run_reports_failure(wired):
     assert result["ingested"] == 0
     assert result["failure"] is not None
     assert "already running" in result["failure"]
+
+
+@pytest.mark.asyncio
+async def test_non_json_body_marks_run_incomplete(wired):
+    """A 200 with a non-JSON body must mark the run incomplete, not raise."""
+    worker, _store, _state, _ = wired
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(
+            return_value=httpx.Response(200, text="<html>oops</html>")
+        )
+        result = await worker.manual(30)
+    assert result["failure"] == "non-JSON response body"

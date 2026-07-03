@@ -211,7 +211,13 @@ class RestBackfillWorker:
                     failure = f"http {resp.status_code}"
                     break
 
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError as e:
+                    # 200 with a non-JSON body: incomplete run, not a crash.
+                    log.warning("rest_backfill non-JSON body reason=%s: %s", reason, e)
+                    failure = "non-JSON response body"
+                    break
                 news = data.get("news") or []
                 for item in news:
                     counts[await self._ingest_one(item)] += 1

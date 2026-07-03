@@ -279,7 +279,10 @@ class BaseStreamWorker:
                             f"{self._config.auth_retry_seconds}s"
                         ),
                     )
-                wait = float(self._config.auth_retry_seconds)
+                # Clamp: AUTH_RETRY_SECONDS <= 0 would make the wait_for below
+                # time out instantly, turning the slow 402 cadence into a
+                # tight reconnect loop against Alpaca.
+                wait = max(1.0, float(self._config.auth_retry_seconds))
                 log.error(
                     "%s fatal auth failure #%d; retrying in %.0fs",
                     self.stream_name,

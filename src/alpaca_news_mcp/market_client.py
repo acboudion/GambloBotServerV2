@@ -162,7 +162,14 @@ class MarketDataClient:
                     resp.text[:200],
                 )
                 return None
-            payload = resp.json()
+            try:
+                payload = resp.json()
+            except ValueError as e:
+                # HTTP 200 with a non-JSON body (broken intermediary): treat
+                # like any other upstream failure — callers surface the
+                # structured alpaca_request_failed error, not an exception.
+                log.warning("market client non-JSON body %s: %s", path, e)
+                return None
             if cache_key and ttl > 0:
                 self._cache.set(cache_key, payload, ttl)
             return payload
