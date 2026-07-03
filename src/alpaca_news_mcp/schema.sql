@@ -20,8 +20,12 @@ CREATE TABLE IF NOT EXISTS news_articles (
     last_seen_source TEXT NOT NULL,
     update_count INTEGER NOT NULL DEFAULT 0,
     latency_ms INTEGER,
-    is_content_present INTEGER NOT NULL DEFAULT 0
+    is_content_present INTEGER NOT NULL DEFAULT 0,
+    seq INTEGER
 );
+-- NOTE: idx_articles_seq is created by migration m1 (migrations.py), which also
+-- backfills seq for databases created before the column existed. schema.sql runs
+-- before migrations, so the index cannot live here without breaking old DBs.
 
 CREATE INDEX IF NOT EXISTS idx_articles_created_at ON news_articles(created_at);
 CREATE INDEX IF NOT EXISTS idx_articles_updated_at ON news_articles(updated_at);

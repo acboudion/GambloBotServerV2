@@ -41,6 +41,7 @@ class NewsArticle(BaseModel):
     update_count: int = 0
     latency_ms: int | None = None
     is_content_present: bool = False
+    seq: int | None = None
     raw: dict[str, Any] | None = None
 
 

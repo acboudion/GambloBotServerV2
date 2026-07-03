@@ -22,6 +22,9 @@ MAX_DIGEST_ARTICLES = 25
 MAX_VERSIONS_DEFAULT = 50
 MAX_VERSIONS_HARD = 200
 MAX_CONTENT_CHARS = 4000
+MAX_CURSOR_ITEMS = 500
+
+VALID_FIELD_MODES = ("compact", "standard", "full")
 
 
 def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
@@ -32,30 +35,51 @@ def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
     }
 
 
+def _invalid_fields(fields: str) -> dict[str, Any]:
+    return {"error": "invalid_fields", "fields": fields, "valid": list(VALID_FIELD_MODES)}
+
+
 def _serialize_article(
     article: Any,
     *,
+    fields: str = "standard",
     include_content: bool = False,
     include_raw: bool = False,
 ) -> dict[str, Any]:
-    out: dict[str, Any] = {
-        "id": article.id,
-        "headline": article.headline,
-        "summary": article.summary,
-        "author": article.author,
-        "created_at": article.created_at,
-        "updated_at": article.updated_at,
-        "url": article.url,
-        "source": article.source,
-        "symbols": list(article.symbols),
-        "first_seen_at": article.first_seen_at,
-        "last_seen_at": article.last_seen_at,
-        "last_seen_source": article.last_seen_source,
-        "update_count": article.update_count,
-        "latency_ms": article.latency_ms,
-        "is_content_present": article.is_content_present,
-    }
-    if include_content:
+    """Serialize an article at the requested projection level.
+
+    compact  — headline-level identification only (token-lean for polling loops)
+    standard — full metadata without body text
+    full     — standard plus truncated content_text
+    """
+    if fields == "compact":
+        out: dict[str, Any] = {
+            "id": article.id,
+            "headline": article.headline,
+            "symbols": list(article.symbols),
+            "source": article.source,
+            "updated_at": article.updated_at or article.created_at,
+            "url": article.url,
+        }
+    else:
+        out = {
+            "id": article.id,
+            "headline": article.headline,
+            "summary": article.summary,
+            "author": article.author,
+            "created_at": article.created_at,
+            "updated_at": article.updated_at,
+            "url": article.url,
+            "source": article.source,
+            "symbols": list(article.symbols),
+            "first_seen_at": article.first_seen_at,
+            "last_seen_at": article.last_seen_at,
+            "last_seen_source": article.last_seen_source,
+            "update_count": article.update_count,
+            "latency_ms": article.latency_ms,
+            "is_content_present": article.is_content_present,
+        }
+    if fields == "full" or include_content:
         out["content_text"] = truncate(article.content_text, MAX_CONTENT_CHARS)
     if include_raw:
         out["raw"] = article.raw
@@ -92,9 +116,12 @@ def register(mcp: FastMCP) -> None:
         limit: int = 50,
         include_content: bool = False,
         include_raw: bool = False,
+        fields: str = "standard",
     ) -> dict[str, Any]:
         if limit > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit)
+        if fields not in VALID_FIELD_MODES:
+            return _invalid_fields(fields)
         limit = min(max(1, limit), MAX_ARTICLES_DEFAULT if limit <= 0 else limit)
         limit = min(limit, MAX_ARTICLES_HARD)
         app = get_app_state()
@@ -104,9 +131,79 @@ def register(mcp: FastMCP) -> None:
         return {
             "count": len(articles),
             "articles": [
-                _serialize_article(a, include_content=include_content, include_raw=include_raw)
+                _serialize_article(
+                    a,
+                    fields=fields,
+                    include_content=include_content,
+                    include_raw=include_raw,
+                )
                 for a in articles
             ],
+        }
+
+    @mcp.tool(
+        description=(
+            "Delta poll: news articles newer than `cursor` (a monotonic ingest "
+            "sequence), oldest first. Returns next_cursor to pass back on the "
+            "next call; has_more=true means call again immediately. Start with "
+            "cursor=0 to begin from the oldest retained article. Updated "
+            "articles re-surface with a fresh cursor position."
+        )
+    )
+    async def get_news_since(
+        cursor: int = 0,
+        limit: int = 100,
+        symbols: list[str] | None = None,
+        fields: str = "compact",
+    ) -> dict[str, Any]:
+        if limit > MAX_CURSOR_ITEMS:
+            return _limit_exceeded(MAX_CURSOR_ITEMS, limit)
+        if fields not in VALID_FIELD_MODES:
+            return _invalid_fields(fields)
+        limit = min(max(1, limit), MAX_CURSOR_ITEMS)
+        cursor = max(0, cursor)
+        app = get_app_state()
+        articles, next_cursor, has_more = await app.store.articles_since(
+            cursor=cursor, limit=limit, symbols=symbols
+        )
+        serialized = []
+        for a in articles:
+            d = _serialize_article(a, fields=fields)
+            d["seq"] = a.seq
+            serialized.append(d)
+        return {
+            "count": len(serialized),
+            "articles": serialized,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        }
+
+    @mcp.tool(
+        description=(
+            "Delta poll: alerts newer than `cursor`, oldest first. Each alert "
+            "carries its own `cursor`; pass next_cursor back on the next call. "
+            "has_more=true means call again immediately."
+        )
+    )
+    async def get_alerts_since(
+        cursor: int = 0,
+        limit: int = 100,
+        severity: str | None = None,
+        categories: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if limit > MAX_CURSOR_ITEMS:
+            return _limit_exceeded(MAX_CURSOR_ITEMS, limit)
+        limit = min(max(1, limit), MAX_CURSOR_ITEMS)
+        cursor = max(0, cursor)
+        app = get_app_state()
+        alerts, next_cursor, has_more = await app.store.alerts_since(
+            cursor=cursor, limit=limit, severity=severity, categories=categories
+        )
+        return {
+            "count": len(alerts),
+            "alerts": alerts,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
         }
 
     @mcp.tool(description="Get a single news article by Alpaca id, optionally with version history.")
@@ -143,9 +240,12 @@ def register(mcp: FastMCP) -> None:
         until: str | None = None,
         limit: int = 50,
         include_content: bool = False,
+        fields: str = "standard",
     ) -> dict[str, Any]:
         if limit > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit)
+        if fields not in VALID_FIELD_MODES:
+            return _invalid_fields(fields)
         if not query or not query.strip():
             return {"error": "empty_query"}
         app = get_app_state()
@@ -159,7 +259,8 @@ def register(mcp: FastMCP) -> None:
         return {
             "count": len(articles),
             "articles": [
-                _serialize_article(a, include_content=include_content) for a in articles
+                _serialize_article(a, fields=fields, include_content=include_content)
+                for a in articles
             ],
         }
 
@@ -169,11 +270,14 @@ def register(mcp: FastMCP) -> None:
         minutes: int = 1440,
         limit_per_symbol: int = 25,
         include_content: bool = False,
+        fields: str = "standard",
     ) -> dict[str, Any]:
         if not symbols:
             return {"error": "no_symbols"}
         if limit_per_symbol > MAX_ARTICLES_HARD:
             return _limit_exceeded(MAX_ARTICLES_HARD, limit_per_symbol)
+        if fields not in VALID_FIELD_MODES:
+            return _invalid_fields(fields)
         # Clamp to >= 1: SQLite treats LIMIT <= 0 as "no limit", which would
         # bypass the bounded-response contract.
         limit_per_symbol = max(1, min(limit_per_symbol, MAX_ARTICLES_HARD))
@@ -184,7 +288,8 @@ def register(mcp: FastMCP) -> None:
         out: dict[str, Any] = {}
         for sym, articles in bucketed.items():
             out[sym] = [
-                _serialize_article(a, include_content=include_content) for a in articles
+                _serialize_article(a, fields=fields, include_content=include_content)
+                for a in articles
             ]
         return {"symbols": out}
 

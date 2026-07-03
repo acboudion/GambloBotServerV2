@@ -15,6 +15,7 @@ from typing import Any
 import aiosqlite
 
 from .logging_utils import get_logger
+from .migrations import NEWS_MIGRATIONS, migrate
 from .models import Alert, IngestionStats, LatencyStats, NewsArticle, NewsArticleVersion
 from .normalize import NormalizedArticle
 
@@ -38,6 +39,7 @@ class Store:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
+        self._next_seq: int = 1
 
     @classmethod
     async def open(cls, path: str) -> Store:
@@ -69,6 +71,17 @@ class Store:
         async with self._write_lock:
             await self.conn.executescript(sql_text)
             await self.conn.commit()
+            await migrate(self.conn, NEWS_MIGRATIONS)
+            cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM news_articles")
+            row = await cur.fetchone()
+            await cur.close()
+            self._next_seq = (int(row[0]) if row else 0) + 1
+
+    def _allocate_seq(self) -> int:
+        """Next monotonic ingest sequence. Callers must hold the write lock."""
+        seq = self._next_seq
+        self._next_seq += 1
+        return seq
 
     async def upsert_article(
         self,
@@ -79,7 +92,8 @@ class Store:
         """Insert or update an article. Returns whether new and whether a version was added."""
         async with self._write_lock:
             cur = await self.conn.execute(
-                """SELECT id, headline, summary, content_html, updated_at, update_count, symbols_json
+                """SELECT id, headline, summary, content_html, updated_at, update_count,
+                          symbols_json, seq
                    FROM news_articles WHERE id = ?""",
                 (normalized.id,),
             )
@@ -99,13 +113,13 @@ class Store:
                         content_html, content_text, url, source,
                         symbols_json, raw_json,
                         first_seen_at, last_seen_at, last_seen_source,
-                        update_count, latency_ms, is_content_present
+                        update_count, latency_ms, is_content_present, seq
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?,
                         ?, ?,
                         ?, ?, ?,
-                        0, ?, ?
+                        0, ?, ?, ?
                     )
                     """,
                     (
@@ -126,6 +140,7 @@ class Store:
                         source_kind,
                         normalized.latency_ms,
                         1 if normalized.is_content_present else 0,
+                        self._allocate_seq(),
                     ),
                 )
                 version_inserted = await self._insert_version(
@@ -155,6 +170,10 @@ class Store:
                 changed = content_changed or symbols_changed
                 # update last_seen + counters
                 new_update_count = (existing["update_count"] or 0) + (1 if changed else 0)
+                # A changed article gets a fresh seq so delta-cursor pollers
+                # (get_news_since) see the update; unchanged re-deliveries keep
+                # their position and stay invisible to cursors.
+                new_seq = self._allocate_seq() if changed else existing["seq"]
                 await self.conn.execute(
                     """
                     UPDATE news_articles SET
@@ -173,7 +192,8 @@ class Store:
                         last_seen_source = ?,
                         update_count = ?,
                         latency_ms = COALESCE(latency_ms, ?),
-                        is_content_present = MAX(is_content_present, ?)
+                        is_content_present = MAX(is_content_present, ?),
+                        seq = ?
                     WHERE id = ?
                     """,
                     (
@@ -193,6 +213,7 @@ class Store:
                         new_update_count,
                         normalized.latency_ms,
                         1 if normalized.is_content_present else 0,
+                        new_seq,
                         normalized.id,
                     ),
                 )
@@ -428,6 +449,97 @@ class Store:
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
+
+    async def articles_since(
+        self,
+        *,
+        cursor: int,
+        limit: int,
+        symbols: list[str] | None = None,
+    ) -> tuple[list[NewsArticle], int, bool]:
+        """Articles with seq > cursor in ingest order.
+
+        Returns (articles, next_cursor, has_more). next_cursor equals the input
+        cursor when nothing new arrived, so pollers can pass it back verbatim.
+        """
+        clauses = ["seq > ?"]
+        params: list[Any] = [cursor]
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            clauses.append(
+                f"id IN (SELECT article_id FROM news_symbol_index WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        sql = (
+            "SELECT * FROM news_articles WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY seq ASC LIMIT ?"
+        )
+        params.append(limit + 1)
+        cur = await self.conn.execute(sql, params)
+        rows = list(await cur.fetchall())
+        await cur.close()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        articles = [self._row_to_article(r) for r in rows]
+        # With a symbol filter, articles outside the filter still advance seq;
+        # skipping ahead to MAX(seq) would lose them if the filter changes, so
+        # the cursor only ever advances over rows actually returned.
+        next_cursor = articles[-1].seq if articles and articles[-1].seq else cursor
+        return articles, next_cursor, has_more
+
+    async def alerts_since(
+        self,
+        *,
+        cursor: int,
+        limit: int,
+        severity: str | None = None,
+        categories: list[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """Alerts with rowid > cursor in insert order (alerts are insert-only).
+
+        Returns (alert_dicts_with_cursor, next_cursor, has_more).
+        """
+        clauses = ["rowid > ?"]
+        params: list[Any] = [cursor]
+        if severity:
+            clauses.append("severity = ?")
+            params.append(severity)
+        if categories:
+            placeholders = ",".join("?" * len(categories))
+            clauses.append(f"category IN ({placeholders})")
+            params.extend(categories)
+        sql = (
+            "SELECT rowid AS cursor_id, * FROM alerts WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY rowid ASC LIMIT ?"
+        )
+        params.append(limit + 1)
+        cur = await self.conn.execute(sql, params)
+        rows = list(await cur.fetchall())
+        await cur.close()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "cursor": int(r["cursor_id"]),
+                    "alert_id": r["alert_id"],
+                    "article_id": r["article_id"],
+                    "created_at": r["created_at"],
+                    "severity": r["severity"],
+                    "category": r["category"],
+                    "symbols": json.loads(r["symbols_json"] or "[]"),
+                    "headline": r["headline"],
+                    "reason": r["reason"],
+                    "acknowledged": bool(r["acknowledged"]),
+                }
+            )
+        # Filtered-out rows still advance rowid; same conservative-cursor rule
+        # as articles_since.
+        next_cursor = out[-1]["cursor"] if out else cursor
+        return out, next_cursor, has_more
 
     async def articles_for_symbols(
         self,
@@ -737,5 +849,6 @@ class Store:
             update_count=row["update_count"] or 0,
             latency_ms=row["latency_ms"],
             is_content_present=bool(row["is_content_present"]),
+            seq=row["seq"] if "seq" in row.keys() else None,
             raw=raw,
         )
