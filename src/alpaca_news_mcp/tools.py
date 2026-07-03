@@ -446,7 +446,15 @@ def register(mcp: FastMCP) -> None:
         if minutes <= 0 or minutes > 60 * 24 * 7:
             return {"error": "invalid_minutes", "min": 1, "max": 60 * 24 * 7}
         result = await app.rest_backfill.manual(minutes)
-        return {"window_minutes": minutes, **result, "status": "ok"}
+        failure = result.pop("failure", None)
+        out = {
+            "window_minutes": minutes,
+            **result,
+            "status": "incomplete" if failure else "ok",
+        }
+        if failure:
+            out["failure"] = failure
+        return out
 
 
 __all__ = ["register"]

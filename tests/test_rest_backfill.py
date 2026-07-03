@@ -233,7 +233,7 @@ async def test_backfill_distinguishes_new_updated_duplicate(wired):
         route.mock(return_value=httpx.Response(200, json=page_v2))
         third = await worker.manual(60)
 
-    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1}
+    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "failure": None}
     assert second["ingested"] == 1 and second["updated"] == 1 and second["new"] == 0 and second["duplicate"] == 0
     assert third["ingested"] == 1 and third["duplicate"] == 1 and third["new"] == 0 and third["updated"] == 0
 
@@ -355,3 +355,21 @@ async def test_gap_fill_raises_when_items_fail_to_ingest(wired):
             await worker.gap_fill()
     # The good article still landed (retry is idempotent on the rest).
     assert (await _store.get_article(901)) is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_backfill_surfaces_failure(wired):
+    """Non-raising runs must still report incompleteness — the manual MCP tool
+    turns this into status=incomplete instead of a false ok."""
+    worker, _store, _state, _ = wired
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(403, json={"error": "forbidden"}))
+        result = await worker.manual(30)
+    assert result["failure"] is not None
+    assert "403" in result["failure"]
+
+    success_page = {"news": [], "next_page_token": None}
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=success_page))
+        result = await worker.manual(30)
+    assert result["failure"] is None

@@ -177,3 +177,20 @@ async def test_bars_sends_configured_feed(client):
 
     await client.bars(["AAPL"], start_iso="2026-07-02T13:00:00Z", feed="iex")
     assert route.calls[1].request.url.params["feed"] == "iex"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_latest_and_snapshots_send_configured_feed(client):
+    """REST fallbacks merged with stream data must come from the same feed."""
+    latest_route = respx.get("https://data.alpaca.markets/v2/stocks/trades/latest").mock(
+        return_value=httpx.Response(200, json={"trades": {}})
+    )
+    await client.latest("trades", ["AAPL"])
+    assert latest_route.calls[0].request.url.params["feed"] == "sip"
+
+    snap_route = respx.get("https://data.alpaca.markets/v2/stocks/snapshots").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    await client.snapshots(["AAPL"])
+    assert snap_route.calls[0].request.url.params["feed"] == "sip"

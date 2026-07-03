@@ -31,15 +31,16 @@ class BackfillError(RuntimeError):
     gap-fills so BaseStreamWorker's retry/alert path engages)."""
 
 
-def _empty_counts(*, skipped: int = 0) -> dict[str, int]:
+def _empty_counts(*, skipped: int = 0) -> dict[str, Any]:
     """Canonical zero-shape so callers can destructure regardless of branch."""
-    out: dict[str, int] = {
+    out: dict[str, Any] = {
         "ingested": 0,
         "new": 0,
         "updated": 0,
         "duplicate": 0,
         "failed": 0,
         "pages": 0,
+        "failure": None,
     }
     if skipped:
         out["skipped"] = skipped
@@ -82,7 +83,7 @@ class RestBackfillWorker:
                 await self._client.aclose()
             self._client = None
 
-    async def backfill_startup(self) -> dict[str, int]:
+    async def backfill_startup(self) -> dict[str, Any]:
         if not self._config.enable_rest_backfill:
             log.info("rest_backfill disabled at startup")
             return _empty_counts()
@@ -91,7 +92,7 @@ class RestBackfillWorker:
         )
         return await self._run(start_iso=start.isoformat(), reason="startup")
 
-    async def gap_fill(self, since_iso: str | None = None) -> dict[str, int]:
+    async def gap_fill(self, since_iso: str | None = None) -> dict[str, Any]:
         if not self._config.enable_rest_backfill:
             return _empty_counts()
         if since_iso is None:
@@ -116,13 +117,13 @@ class RestBackfillWorker:
             start_iso=adjusted.isoformat(), reason="gap_fill", raise_on_failure=True
         )
 
-    async def manual(self, minutes: int) -> dict[str, int]:
+    async def manual(self, minutes: int) -> dict[str, Any]:
         start = datetime.now(UTC) - timedelta(minutes=minutes)
         return await self._run(start_iso=start.isoformat(), reason="manual")
 
     async def _run(
         self, *, start_iso: str, reason: str, raise_on_failure: bool = False
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
             if raise_on_failure:
@@ -245,6 +246,9 @@ class RestBackfillWorker:
                 "duplicate": counts["duplicate"],
                 "failed": counts["failed"],
                 "pages": pages,
+                # Non-raising callers (startup, manual tool) must still be able
+                # to tell an incomplete run from a clean one.
+                "failure": failure,
             }
 
     async def _ingest_one(self, payload: dict[str, Any]) -> IngestStatus:

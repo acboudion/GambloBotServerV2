@@ -198,27 +198,32 @@ class MarketDataClient:
     # ---- snapshots / latest -----------------------------------------------------------
 
     async def snapshots(self, symbols: list[str]) -> dict[str, Any] | None:
+        # Pin to the configured stream feed so REST snapshots can't mix a
+        # different feed into responses alongside stream-cached data.
+        feed = self._config.alpaca_stock_feed
         joined = ",".join(sorted({s.upper() for s in symbols}))
         return await self._get_json(
             host="data",
             path=SNAPSHOTS_PATH,
-            params={"symbols": joined},
-            cache_key=f"snapshots:{joined}",
+            params={"symbols": joined, "feed": feed},
+            cache_key=f"snapshots:{feed}:{joined}",
             ttl=self._config.market_cache_snapshot_ttl,
         )
 
     async def latest(self, kind: str, symbols: list[str]) -> dict[str, Any] | None:
         """kind: trades|quotes|bars. Returns the raw Alpaca payload
-        ({'trades': {SYM: {...}}} etc.)."""
+        ({'trades': {SYM: {...}}} etc.). Pinned to the configured stream feed
+        so stream+rest merges never mix feeds."""
         path = LATEST_PATHS.get(kind)
         if path is None:
             raise ValueError(f"invalid latest kind: {kind}")
+        feed = self._config.alpaca_stock_feed
         joined = ",".join(sorted({s.upper() for s in symbols}))
         return await self._get_json(
             host="data",
             path=path,
-            params={"symbols": joined},
-            cache_key=f"latest:{kind}:{joined}",
+            params={"symbols": joined, "feed": feed},
+            cache_key=f"latest:{kind}:{feed}:{joined}",
             ttl=self._config.market_cache_latest_ttl,
         )
 
