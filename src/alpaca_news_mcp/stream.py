@@ -93,6 +93,12 @@ class NewsStreamWorker(BaseStreamWorker):
     def batch_max(self) -> int:
         return PERSIST_BATCH_MAX
 
+    async def capture_gap_fill_watermark(self) -> str | None:
+        # Passed positionally into RestBackfillWorker.gap_fill(since_iso);
+        # captured before the receive loop so a post-reconnect article can't
+        # advance it past the outage window.
+        return self._state.last_seen_updated_at
+
     async def on_authenticated(self, ws: Any) -> None:
         await self._subscribe(ws)
 

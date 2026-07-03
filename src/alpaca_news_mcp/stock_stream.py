@@ -564,7 +564,15 @@ class StockStreamWorker(BaseStreamWorker):
 
     # ---- bar gap-fill ----------------------------------------------------------------
 
-    async def _bar_gap_fill(self) -> None:
+    async def capture_gap_fill_watermark(self) -> dict[str, int]:
+        # Latest stored bar per symbol, snapshotted before the receive loop
+        # runs — otherwise a post-reconnect stream bar could advance the
+        # watermark and the fill would skip the outage window.
+        return await self._market_store.latest_bar_ts(
+            sorted(self._watchlist), timeframe="1min"
+        )
+
+    async def _bar_gap_fill(self, watermark: dict[str, int] | None = None) -> None:
         """After a reconnect, backfill minute bars from REST for the watchlist.
         Trades/quotes gaps are deliberately NOT backfilled (accepted loss for
         tick data; bars carry the analytical signal)."""
@@ -572,7 +580,11 @@ class StockStreamWorker(BaseStreamWorker):
         symbols = sorted(self._watchlist)
         if not symbols:
             return
-        latest = await self._market_store.latest_bar_ts(symbols, timeframe="1min")
+        latest = (
+            watermark
+            if watermark is not None
+            else await self._market_store.latest_bar_ts(symbols, timeframe="1min")
+        )
         now = datetime.now(UTC)
         fallback_start = int(now.timestamp()) - BAR_GAP_FILL_FALLBACK_MINUTES * 60
         start_ts = min(

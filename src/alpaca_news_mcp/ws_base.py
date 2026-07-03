@@ -36,6 +36,7 @@ AUTH_TIMEOUT_SECONDS = 10.0
 STALE_ALERT_MIN_INTERVAL_SECONDS = 3600.0
 GAP_FILL_MAX_ATTEMPTS = 3
 GAP_FILL_RETRY_WAIT_SECONDS = 30.0
+SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class SingletonViolation(RuntimeError):
@@ -167,6 +168,16 @@ class BaseStreamWorker:
         restart would otherwise silently lose bars until the next reconnect."""
         return False
 
+    async def capture_gap_fill_watermark(self) -> Any:
+        """Snapshot the gap-fill start watermark BEFORE the receive loop runs.
+
+        The gap-fill task runs concurrently with the receive loop; if the
+        callback read its watermark lazily, a post-reconnect message persisted
+        first would advance it past the outage window and the fill would
+        silently skip the gap. The captured value is passed to the gap-fill
+        callback."""
+        return None
+
     # ---- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -179,17 +190,36 @@ class BaseStreamWorker:
 
     async def stop(self) -> None:
         self._stop_event.set()
-        for t in (self._main_task, self._persister_task, self._gap_fill_task):
-            if t is not None:
-                t.cancel()
-        for t in (self._main_task, self._persister_task, self._gap_fill_task):
-            if t is not None:
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    log.warning("%s task raised during shutdown: %s", self.stream_name, e)
+
+        async def _await_cancelled(task: asyncio.Task[None] | None) -> None:
+            if task is None:
+                return
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.warning("%s task raised during shutdown: %s", self.stream_name, e)
+
+        # Stop the receiver first so nothing new is enqueued...
+        await _await_cancelled(self._main_task)
+        await _await_cancelled(self._gap_fill_task)
+        # ...then let the persister drain items already accepted into the
+        # queue (bounded) so a graceful restart doesn't discard the last
+        # batch, and only then cancel it.
+        if self._persister_task is not None and not self._persister_task.done():
+            try:
+                await asyncio.wait_for(
+                    self._queue.join(), timeout=SHUTDOWN_DRAIN_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                log.warning(
+                    "%s shutdown: queue drain timed out with ~%d item(s) unpersisted",
+                    self.stream_name,
+                    self._queue.qsize(),
+                )
+        await _await_cancelled(self._persister_task)
         self._main_task = None
         self._persister_task = None
         self._gap_fill_task = None
@@ -306,11 +336,14 @@ class BaseStreamWorker:
                 self._ws = ws
                 # Recover anything missed while disconnected. Runs AFTER the
                 # subscription is live (so nothing new is missed during the
-                # fill) and concurrently with the receive loop.
+                # fill) and concurrently with the receive loop. The watermark
+                # is captured NOW — before any post-reconnect message can be
+                # persisted and advance it past the outage window.
                 if self._gap_fill is not None and (
                     self._sessions_authed > 1 or self.gap_fill_on_first_session()
                 ):
-                    self._spawn_gap_fill()
+                    watermark = await self.capture_gap_fill_watermark()
+                    self._spawn_gap_fill(watermark)
                 await self._receive_loop(ws)
             finally:
                 self._ws = None
@@ -448,19 +481,19 @@ class BaseStreamWorker:
             self.stream_name, last_message_at=datetime.now(UTC).isoformat()
         )
 
-    def _spawn_gap_fill(self) -> None:
+    def _spawn_gap_fill(self, watermark: Any = None) -> None:
         if self._gap_fill_task is not None and not self._gap_fill_task.done():
             log.info("%s gap fill already running; not spawning another", self.stream_name)
             return
         self._gap_fill_task = asyncio.create_task(
-            self._gap_fill_with_retries(), name=f"{self.stream_name}-gap-fill"
+            self._gap_fill_with_retries(watermark), name=f"{self.stream_name}-gap-fill"
         )
 
-    async def _gap_fill_with_retries(self) -> None:
+    async def _gap_fill_with_retries(self, watermark: Any = None) -> None:
         assert self._gap_fill is not None
         for attempt in range(1, GAP_FILL_MAX_ATTEMPTS + 1):
             try:
-                await self._gap_fill()
+                await self._gap_fill(watermark)
                 return
             except asyncio.CancelledError:
                 raise

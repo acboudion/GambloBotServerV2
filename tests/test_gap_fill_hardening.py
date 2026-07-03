@@ -43,7 +43,7 @@ async def test_gap_fill_retries_and_alerts(wired, monkeypatch):
     monkeypatch.setattr(ws_base, "GAP_FILL_RETRY_WAIT_SECONDS", 0.01)
     calls = 0
 
-    async def failing_gap_fill():
+    async def failing_gap_fill(watermark=None):
         nonlocal calls
         calls += 1
         raise RuntimeError("REST is down")
@@ -64,7 +64,7 @@ async def test_gap_fill_success_stops_retrying(wired):
     cfg, store, state, alerts = wired
     calls = 0
 
-    async def flaky_gap_fill():
+    async def flaky_gap_fill(watermark=None):
         nonlocal calls
         calls += 1
 
@@ -154,3 +154,50 @@ async def test_replay_loop_task_lifecycle(wired):
     await asyncio.sleep(0.05)
     await worker.stop()
     assert worker._replay_task is None
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_receives_captured_watermark(wired):
+    """The watermark captured before the receive loop must be handed to the
+    gap-fill callback — a lazily-read watermark could be advanced by a
+    post-reconnect article, silently skipping the outage window."""
+    cfg, store, state, alerts = wired
+    received: list = []
+
+    async def recording_gap_fill(watermark=None):
+        received.append(watermark)
+
+    worker = NewsStreamWorker(cfg, store, state, alerts, gap_fill_callback=recording_gap_fill)
+    state.last_seen_updated_at = "2026-04-28T20:00:00+00:00"
+    captured = await worker.capture_gap_fill_watermark()
+    # Simulate a post-reconnect article advancing the live watermark.
+    state.last_seen_updated_at = "2026-04-28T21:00:00+00:00"
+    await worker._gap_fill_with_retries(captured)
+    assert received == ["2026-04-28T20:00:00+00:00"]
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_queue_before_cancelling_persister(wired, monkeypatch):
+    """Graceful shutdown must persist items already accepted into the queue
+    instead of discarding them with the persister cancellation."""
+    cfg, store, state, alerts = wired
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+
+    original = worker.persist_batch
+
+    async def slow_persist(batch):
+        await asyncio.sleep(0.05)
+        await original(batch)
+
+    worker.persist_batch = slow_persist  # type: ignore[method-assign]
+    # Start only the persister (no websocket) and enqueue directly.
+    worker._persister_task = asyncio.create_task(worker._persister_loop())
+    worker._main_task = asyncio.create_task(asyncio.sleep(3600))
+    for i in range(3):
+        worker._queue.put_nowait(("n", {
+            "T": "n", "id": 5000 + i, "headline": f"queued {i}",
+            "created_at": "2026-04-28T19:00:00Z", "updated_at": "2026-04-28T19:00:00Z",
+        }))
+    await worker.stop()
+    for i in range(3):
+        assert (await store.get_article(5000 + i)) is not None, i

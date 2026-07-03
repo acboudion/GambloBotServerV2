@@ -331,3 +331,27 @@ async def test_gap_fill_raises_when_page_cap_truncates(wired, monkeypatch):
         mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=page))
         with pytest.raises(rb.BackfillError, match="page cap"):
             await worker.gap_fill()
+
+
+@pytest.mark.asyncio
+async def test_gap_fill_raises_when_items_fail_to_ingest(wired):
+    """Item-level ingest failures (bad payloads) leave the window incomplete —
+    reconnect gap-fills must raise, not report success over missing articles."""
+    from alpaca_news_mcp.rest_backfill import BackfillError
+
+    worker, _store, state, _ = wired
+    state.last_seen_updated_at = "2026-04-28T19:00:00+00:00"
+    page = {
+        "news": [
+            {"id": "not-an-int", "headline": "unparseable id"},
+            {"id": 901, "headline": "fine", "created_at": "2026-04-28T19:01:00Z",
+             "updated_at": "2026-04-28T19:01:00Z"},
+        ],
+        "next_page_token": None,
+    }
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(return_value=httpx.Response(200, json=page))
+        with pytest.raises(BackfillError, match="failed to ingest"):
+            await worker.gap_fill()
+    # The good article still landed (retry is idempotent on the rest).
+    assert (await _store.get_article(901)) is not None

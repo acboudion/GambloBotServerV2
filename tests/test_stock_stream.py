@@ -510,3 +510,37 @@ async def test_restore_honors_persisted_empty_watchlist(wired):
     assert worker2.watchlist() == ["AAPL", "TSLA"]  # config default pre-restore
     await worker2.restore_watchlist()
     assert worker2.watchlist() == []
+
+
+@pytest.mark.asyncio
+async def test_bar_gap_fill_uses_captured_watermark(wired):
+    """_bar_gap_fill must honor the pre-receive watermark instead of
+    re-reading latest_bar_ts (which a post-reconnect stream bar may have
+    advanced past the outage window)."""
+    cfg, store, market_store, state, alerts = wired
+    starts: list[str] = []
+
+    class RecordingClient(_FakeMarketClient):
+        async def bars(self, symbols, *, start_iso, end_iso=None, timeframe="1Min",
+                       limit_per_page=1000):
+            starts.append(start_iso)
+            return {}
+
+    client = RecordingClient()
+    worker = _worker(cfg, store, market_store, state, alerts, market_client=client)
+
+    old_ts = 1_700_000_000 // 60 * 60
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", old_ts, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+    )
+    watermark = await worker.capture_gap_fill_watermark()
+    # A post-reconnect stream bar advances the live latest_bar_ts.
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", old_ts + 3600, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+    )
+    await worker._bar_gap_fill(watermark)
+    assert len(starts) == 1
+    assert str(old_ts + 3600) not in starts[0]
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    assert starts[0] == _dt.fromtimestamp(old_ts, tz=_UTC).isoformat()

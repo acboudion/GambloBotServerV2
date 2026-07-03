@@ -217,6 +217,12 @@ class RestBackfillWorker:
                 failure = f"page cap ({max_pages}) reached with pages remaining"
                 log.warning("rest_backfill %s reason=%s", failure, reason)
 
+            if failure is None and counts["failed"] > 0:
+                # Item-level ingest failures (normalization/store errors) also
+                # mean the window is incomplete — gap-fills must not report
+                # success over missing articles.
+                failure = f"{counts['failed']} item(s) failed to ingest"
+
             if raise_on_failure and failure is not None:
                 raise BackfillError(f"gap-fill incomplete ({failure})")
 
