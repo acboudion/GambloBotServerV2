@@ -391,6 +391,9 @@ class AlertEngine:
             not suppress_high_latency
             and article.latency_ms is not None
             and article.latency_ms >= self.high_latency_alert_ms
+            and not self._rate_limited(
+                list(article.symbols), "high_latency", "medium"
+            )
         ):
             alerts.append(
                 self._mk_alert(

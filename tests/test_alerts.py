@@ -320,3 +320,25 @@ def test_interest_alerts_respect_rate_limit():
     again = engine.evaluate_article(_mk_article(id=2), interest_symbols={"AAPL"})
     assert not any(a.category == "held_or_interested_symbol" for a in again)
     assert engine.suppressed_alerts >= 1
+
+
+def test_high_latency_alerts_respect_rate_limit():
+    """high_latency alerts must obey the per-symbol hourly cap like every
+    other non-critical category — a burst of delayed articles for one symbol
+    must not flood the alert feed."""
+    engine = _Engine(rate_limit_per_symbol_hour=1)
+    engine.high_latency_alert_ms = 1000
+
+    def slow_article(i):
+        a = _mk_article(id=i)
+        return a.model_copy(update={"latency_ms": 5000})
+
+    first = [
+        a for a in engine.evaluate_article(slow_article(1), interest_symbols=set())
+        if a.category == "high_latency"
+    ]
+    assert len(first) == 1
+    engine.count_emission(first[0])
+    again = engine.evaluate_article(slow_article(2), interest_symbols=set())
+    assert not any(a.category == "high_latency" for a in again)
+    assert engine.suppressed_alerts >= 1
