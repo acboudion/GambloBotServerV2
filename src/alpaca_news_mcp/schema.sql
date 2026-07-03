@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS raw_events (
     received_at TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     message_type TEXT,
-    raw_json TEXT NOT NULL
+    raw_json TEXT NOT NULL,
+    replayed INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_events_received_at ON raw_events(received_at);

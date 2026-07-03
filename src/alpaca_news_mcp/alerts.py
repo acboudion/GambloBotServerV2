@@ -186,6 +186,41 @@ class AlertEngine:
             acknowledged=False,
         )
 
+    def gap_fill_failure_alert(
+        self, *, stream: str, attempt: int, exhausted: bool, error: str
+    ) -> Alert:
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="critical" if exhausted else "high",
+            category="gap_fill_failure",
+            symbols=[],
+            headline=None,
+            reason=(
+                f"{stream} reconnect gap-fill failed (attempt {attempt}"
+                f"{', retries exhausted — articles during the disconnect may be missing'
+                   if exhausted else ''}): {error}"
+            ),
+            acknowledged=False,
+        )
+
+    def coverage_gap_alert(self, *, stream: str, from_iso: str, to_iso: str) -> Alert:
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="medium",
+            category="coverage_gap",
+            symbols=[],
+            headline=None,
+            reason=(
+                f"{stream} stream disconnected with REST backfill disabled; "
+                f"data between {from_iso} and {to_iso} may be missing"
+            ),
+            acknowledged=False,
+        )
+
     def stream_error_alert(
         self, *, code: int, message: str, entitlement: bool = False
     ) -> Alert:

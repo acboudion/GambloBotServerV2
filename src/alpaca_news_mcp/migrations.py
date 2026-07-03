@@ -86,9 +86,19 @@ async def _m2_news_fts(conn: aiosqlite.Connection) -> None:
     await conn.execute("INSERT INTO news_fts(news_fts) VALUES('rebuild')")
 
 
+async def _m3_raw_events_replayed(conn: aiosqlite.Connection) -> None:
+    """Track which queue-overflow-dropped articles have been re-ingested."""
+    await ensure_column(conn, "raw_events", "replayed", "INTEGER NOT NULL DEFAULT 0")
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_raw_events_replay "
+        "ON raw_events(message_type, replayed, received_at)"
+    )
+
+
 NEWS_MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _m1_news_seq),
     (2, _m2_news_fts),
+    (3, _m3_raw_events_replayed),
 ]
 
 

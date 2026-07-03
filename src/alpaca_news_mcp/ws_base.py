@@ -34,6 +34,8 @@ log = get_logger(__name__)
 
 AUTH_TIMEOUT_SECONDS = 10.0
 STALE_ALERT_MIN_INTERVAL_SECONDS = 3600.0
+GAP_FILL_MAX_ATTEMPTS = 3
+GAP_FILL_RETRY_WAIT_SECONDS = 30.0
 
 
 class SingletonViolation(RuntimeError):
@@ -80,6 +82,8 @@ class BaseStreamWorker:
         self._fatal_auth = False
         self._authed_this_session = False
         self._last_stale_alert: float | None = None
+        self._sessions_authed = 0
+        self._gap_fill_task: asyncio.Task[None] | None = None
 
     @classmethod
     def reset_singleton(cls) -> None:
@@ -143,6 +147,9 @@ class BaseStreamWorker:
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
         """Called when backpressure is exhausted and an item is dropped."""
 
+    async def on_session_ended(self, *, authed: bool) -> None:
+        """Called after every connection ends, before the reconnect backoff."""
+
     # ---- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -155,10 +162,10 @@ class BaseStreamWorker:
 
     async def stop(self) -> None:
         self._stop_event.set()
-        for t in (self._main_task, self._persister_task):
+        for t in (self._main_task, self._persister_task, self._gap_fill_task):
             if t is not None:
                 t.cancel()
-        for t in (self._main_task, self._persister_task):
+        for t in (self._main_task, self._persister_task, self._gap_fill_task):
             if t is not None:
                 try:
                     await t
@@ -168,6 +175,7 @@ class BaseStreamWorker:
                     log.warning("%s task raised during shutdown: %s", self.stream_name, e)
         self._main_task = None
         self._persister_task = None
+        self._gap_fill_task = None
 
     # ---- connect / reconnect loop -------------------------------------------
 
@@ -195,6 +203,11 @@ class BaseStreamWorker:
 
             if self._stop_event.is_set():
                 break
+
+            try:
+                await self.on_session_ended(authed=self._authed_this_session)
+            except Exception as e:  # pragma: no cover - defensive
+                log.exception("%s on_session_ended failed: %s", self.stream_name, e)
 
             if self._authed_this_session and auth_failures:
                 auth_failures = 0
@@ -239,12 +252,6 @@ class BaseStreamWorker:
             except TimeoutError:
                 pass
 
-            if self._gap_fill is not None and not self._stop_event.is_set():
-                try:
-                    await self._gap_fill()
-                except Exception as e:
-                    log.warning("%s gap fill failed: %s", self.stream_name, e)
-
             self._state.update_health(
                 self.stream_name,
                 reconnect_count=self._state.snapshot_health(self.stream_name).reconnect_count
@@ -278,6 +285,12 @@ class BaseStreamWorker:
                     self.stream_name, authenticated=True, auth_failed=False
                 )
                 await self.on_authenticated(ws)
+                self._sessions_authed += 1
+                # Recover anything missed while disconnected. Runs AFTER the
+                # subscription is live (so nothing new is missed during the
+                # fill) and concurrently with the receive loop.
+                if self._gap_fill is not None and self._sessions_authed > 1:
+                    self._spawn_gap_fill()
                 await self._receive_loop(ws)
             finally:
                 self._state.update_health(
@@ -413,6 +426,59 @@ class BaseStreamWorker:
         self._state.update_health(
             self.stream_name, last_message_at=datetime.now(UTC).isoformat()
         )
+
+    def _spawn_gap_fill(self) -> None:
+        if self._gap_fill_task is not None and not self._gap_fill_task.done():
+            log.info("%s gap fill already running; not spawning another", self.stream_name)
+            return
+        self._gap_fill_task = asyncio.create_task(
+            self._gap_fill_with_retries(), name=f"{self.stream_name}-gap-fill"
+        )
+
+    async def _gap_fill_with_retries(self) -> None:
+        assert self._gap_fill is not None
+        for attempt in range(1, GAP_FILL_MAX_ATTEMPTS + 1):
+            try:
+                await self._gap_fill()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                failures = (
+                    self._state.snapshot_health(self.stream_name).gap_fill_failures + 1
+                )
+                self._state.update_health(self.stream_name, gap_fill_failures=failures)
+                exhausted = attempt == GAP_FILL_MAX_ATTEMPTS
+                log.warning(
+                    "%s gap fill failed (attempt %d/%d): %s",
+                    self.stream_name,
+                    attempt,
+                    GAP_FILL_MAX_ATTEMPTS,
+                    e,
+                )
+                # Alert on the first failure (high) and on exhaustion
+                # (critical) — not on every retry.
+                if attempt == 1 or exhausted:
+                    alert = self._alerts.gap_fill_failure_alert(
+                        stream=self.stream_name,
+                        attempt=attempt,
+                        exhausted=exhausted,
+                        error=str(e),
+                    )
+                    try:
+                        inserted = await self._store.record_alert(alert, raw_json="{}")
+                        if inserted:
+                            self._state.record_alert(alert)
+                    except Exception:  # pragma: no cover - defensive
+                        log.exception("failed to record gap_fill_failure alert")
+                if not exhausted:
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(), timeout=GAP_FILL_RETRY_WAIT_SECONDS
+                        )
+                        return  # stopping
+                    except TimeoutError:
+                        pass
 
     async def _maybe_record_stale_alert(self, idle: float) -> None:
         now = asyncio.get_event_loop().time()

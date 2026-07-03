@@ -36,6 +36,13 @@ CREATE TABLE news_articles (
     latency_ms INTEGER,
     is_content_present INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE raw_events (
+    event_id TEXT PRIMARY KEY,
+    received_at TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    message_type TEXT,
+    raw_json TEXT NOT NULL
+);
 """
 
 

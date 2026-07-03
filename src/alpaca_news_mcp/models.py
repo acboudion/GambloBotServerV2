@@ -21,6 +21,8 @@ AlertCategory = Literal[
     "stream_error",
     "stream_stale",
     "entitlement_error",
+    "gap_fill_failure",
+    "coverage_gap",
 ]
 
 
@@ -90,6 +92,8 @@ class StreamHealth(BaseModel):
     reconnect_count: int = 0
     stale_reconnects: int = 0
     auth_failed: bool = False
+    gap_fill_failures: int = 0
+    dropped_replayed: int = 0
     connection_limit_blocked: bool = False
     entitlement_error: bool = False
     rest_backfill_enabled: bool = False

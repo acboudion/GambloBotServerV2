@@ -454,6 +454,38 @@ class Store:
             )
             await self.conn.commit()
 
+    async def unreplayed_dropped_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Queue-overflow-dropped articles not yet replayed, oldest first.
+        Each entry: {event_id, payload} where payload is the parsed article
+        dict (None if the stored JSON is unparseable)."""
+        cur = await self.conn.execute(
+            "SELECT event_id, raw_json FROM raw_events "
+            "WHERE message_type = 'queue_overflow_drop' AND replayed = 0 "
+            "ORDER BY received_at ASC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                payload = json.loads(r["raw_json"])
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            out.append({"event_id": r["event_id"], "payload": payload})
+        return out
+
+    async def mark_events_replayed(self, event_ids: list[str]) -> None:
+        if not event_ids:
+            return
+        placeholders = ",".join("?" * len(event_ids))
+        async with self._write_lock:
+            await self.conn.execute(
+                f"UPDATE raw_events SET replayed = 1 WHERE event_id IN ({placeholders})",
+                event_ids,
+            )
+            await self.conn.commit()
+
     async def record_alert(self, alert: Alert, *, raw_json: str) -> bool:
         """Insert an alert. Returns True if inserted, False if (article_id, category) already exists."""
         async with self._write_lock:

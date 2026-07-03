@@ -34,6 +34,9 @@ SUBSCRIPTION_TIMEOUT_SECONDS = 10.0
 # Max articles persisted per batch commit. News volume is low; this only
 # matters during backfill floods and reconnect bursts.
 PERSIST_BATCH_MAX = 64
+# Cadence for re-ingesting articles dropped on queue overflow.
+DROP_REPLAY_INTERVAL_SECONDS = 60.0
+DROP_REPLAY_BATCH = 100
 
 
 class NewsStreamWorker(BaseStreamWorker):
@@ -56,6 +59,26 @@ class NewsStreamWorker(BaseStreamWorker):
             queue_maxsize=config.queue_maxsize,
             gap_fill_callback=gap_fill_callback,
         )
+        self._replay_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        await super().start()
+        if self._replay_task is None:
+            self._replay_task = asyncio.create_task(
+                self._drop_replay_loop(), name="news-drop-replay"
+            )
+
+    async def stop(self) -> None:
+        if self._replay_task is not None:
+            self._replay_task.cancel()
+            try:
+                await self._replay_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                log.warning("drop-replay task raised during shutdown: %s", e)
+            self._replay_task = None
+        await super().stop()
 
     # ---- BaseStreamWorker hooks ---------------------------------------------
 
@@ -212,6 +235,65 @@ class NewsStreamWorker(BaseStreamWorker):
             )
         except Exception as e:  # pragma: no cover - defensive
             log.exception("failed to record dropped article: %s", e)
+
+    # ---- coverage-gap + drop replay ---------------------------------------------
+
+    async def on_session_ended(self, *, authed: bool) -> None:
+        # With REST backfill enabled the reconnect gap-fill recovers the
+        # window. Without it the loss is permanent — make it visible.
+        if not authed or self._config.enable_rest_backfill:
+            return
+        alert = self._alerts.coverage_gap_alert(
+            stream=self.stream_name,
+            from_iso=self._state.last_seen_updated_at or "unknown",
+            to_iso=datetime.now(UTC).isoformat(),
+        )
+        inserted = await self._store.record_alert(alert, raw_json="{}")
+        if inserted:
+            self._state.record_alert(alert)
+
+    async def _drop_replay_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=DROP_REPLAY_INTERVAL_SECONDS
+                )
+                return  # stopping
+            except TimeoutError:
+                pass
+            try:
+                await self._replay_dropped_once()
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log.exception("drop replay failed: %s", e)
+
+    async def _replay_dropped_once(self) -> int:
+        """Re-ingest queue-overflow-dropped articles from raw_events. Returns
+        how many were replayed."""
+        events = await self._store.unreplayed_dropped_events(limit=DROP_REPLAY_BATCH)
+        if not events:
+            return 0
+        payloads: list[dict[str, Any]] = []
+        for ev in events:
+            payload = ev.get("payload")
+            if isinstance(payload, dict):
+                payloads.append(payload)
+            else:
+                log.warning(
+                    "unreplayable dropped event %s (bad payload)", ev.get("event_id")
+                )
+        if payloads:
+            await self._persist_batch(payloads)
+        # Mark even unparseable events so they don't wedge the loop forever.
+        await self._store.mark_events_replayed([ev["event_id"] for ev in events])
+        replayed = (
+            self._state.snapshot_health(self.stream_name).dropped_replayed
+            + len(payloads)
+        )
+        self._state.update_health(self.stream_name, dropped_replayed=replayed)
+        log.info("replayed %d dropped article(s)", len(payloads))
+        return len(payloads)
 
     # ---- error handling -------------------------------------------------------------
 
