@@ -252,3 +252,35 @@ async def test_auth_recovery_clears_auth_failed(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_ws_published_before_subscription_replay(wired):
+    """The live socket must be visible (_ws set) before on_authenticated runs
+    its subscription replay — a watchlist-style mutation racing the handshake
+    otherwise persists its change but never sends the delta."""
+    cfg, store, state, alerts = wired
+    ws_seen: list[bool] = []
+
+    async def handler(ws):
+        await _handshake(ws)
+        await asyncio.sleep(0.3)
+
+    server, port = await _start_fake_ws(handler)
+    cfg2 = replace(cfg, alpaca_news_stream_url=f"ws://127.0.0.1:{port}/news")
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    orig = worker.on_authenticated
+
+    async def spy(ws):
+        ws_seen.append(worker._ws is not None)
+        await orig(ws)
+
+    worker.on_authenticated = spy  # type: ignore[method-assign]
+    try:
+        await worker.start()
+        assert await _wait_for(lambda: len(ws_seen) >= 1)
+        assert ws_seen[0] is True
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()

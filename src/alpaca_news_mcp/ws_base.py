@@ -346,9 +346,12 @@ class BaseStreamWorker:
                 watermark: Any = None
                 if will_gap_fill:
                     watermark = await self.capture_gap_fill_watermark()
+                # Publish the live socket BEFORE the subscription replay so a
+                # watchlist mutation racing the handshake sends its delta over
+                # this connection instead of silently waiting for the next one.
+                self._ws = ws
                 await self.on_authenticated(ws)
                 self._sessions_authed += 1
-                self._ws = ws
                 # Recover anything missed while disconnected. Runs AFTER the
                 # subscription is live (so nothing new is missed during the
                 # fill) and concurrently with the receive loop.

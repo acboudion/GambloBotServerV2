@@ -72,6 +72,13 @@ def _parse_date(value: str | None) -> datetime | None:
     return dt.replace(tzinfo=dt.tzinfo or UTC)
 
 
+def _invalid_date(field: str, value: str) -> dict[str, Any]:
+    """A caller-provided date that failed to parse must be a structured error
+    — silently falling back to a default window would return valid-looking
+    data for the wrong dates."""
+    return {"error": "invalid_date", "field": field, "value": value}
+
+
 def _market_parts(app: AppState) -> tuple[Any, Any] | None:
     if app.stock_stream is None or app.market_store is None:
         return None
@@ -310,11 +317,17 @@ def register(mcp: FastMCP) -> None:
             return {"error": "invalid_timeframe", "valid": list(VALID_TIMEFRAMES)}
         if limit > MAX_BARS:
             return _limit_exceeded(MAX_BARS, limit)
+        start_ts = _iso_to_epoch_s(start)
+        if start and start_ts is None:
+            return _invalid_date("start", start)
+        end_ts = _iso_to_epoch_s(end)
+        if end and end_ts is None:
+            return _invalid_date("end", end)
         rows = await market_store.bars_window(
             symbol,
             timeframe=timeframe,
-            start_ts=_iso_to_epoch_s(start),
-            end_ts=_iso_to_epoch_s(end),
+            start_ts=start_ts,
+            end_ts=end_ts,
             limit=max(1, limit),
         )
         return {
@@ -516,8 +529,14 @@ def register(mcp: FastMCP) -> None:
         app = get_app_state()
         if app.market_client is None:
             return _client_unavailable()
-        start_dt = _parse_date(start) or datetime.now(UTC)
-        end_dt = _parse_date(end) or (start_dt + timedelta(days=14))
+        start_dt = _parse_date(start)
+        if start and start_dt is None:
+            return _invalid_date("start", start)
+        end_dt = _parse_date(end)
+        if end and end_dt is None:
+            return _invalid_date("end", end)
+        start_dt = start_dt or datetime.now(UTC)
+        end_dt = end_dt or (start_dt + timedelta(days=14))
         if end_dt < start_dt:
             return {"error": "invalid_range", "reason": "end before start"}
         if (end_dt - start_dt).days > MAX_CALENDAR_DAYS:
@@ -556,8 +575,14 @@ def register(mcp: FastMCP) -> None:
         if symbols and len(symbols) > MAX_SNAPSHOT_SYMBOLS:
             return _limit_exceeded(MAX_SNAPSHOT_SYMBOLS, len(symbols))
         now = datetime.now(UTC)
-        start_dt = _parse_date(start) or (now - timedelta(days=7))
-        end_dt = _parse_date(end) or (now + timedelta(days=30))
+        start_dt = _parse_date(start)
+        if start and start_dt is None:
+            return _invalid_date("start", start)
+        end_dt = _parse_date(end)
+        if end and end_dt is None:
+            return _invalid_date("end", end)
+        start_dt = start_dt or (now - timedelta(days=7))
+        end_dt = end_dt or (now + timedelta(days=30))
         if end_dt < start_dt:
             return {"error": "invalid_range", "reason": "end before start"}
         if (end_dt - start_dt).days > CORPORATE_ACTIONS_MAX_RANGE_DAYS:

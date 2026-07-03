@@ -271,19 +271,27 @@ class StockStreamWorker(BaseStreamWorker):
         return max(1, int(self._config.stock_queue_maxsize * 0.75))
 
     async def on_authenticated(self, ws: Any) -> None:
-        # New session: the previous session's ack no longer describes what
-        # Alpaca is delivering. Clear it so health/tools never report symbols
-        # the current connection hasn't acknowledged (trust acks, not requests).
-        self._acknowledged = None
-        # Replay the full desired subscription; the ack arrives via the
-        # receive loop (handle_item) so we don't block here.
-        await self._send_subscription(ws, "subscribe", sorted(self._watchlist))
-        self._state.update_health(
-            self.stream_name,
-            requested_subscription={c: sorted(self._watchlist) for c in self._channels},
-            acknowledged_subscription=None,
-            subscription_mode="watchlist",
-        )
+        # Hold the watchlist lock across the replay so a concurrent
+        # update_watchlist can't interleave: it either lands before the
+        # snapshot read (replay includes it) or after the send (its delta
+        # goes over the already-published socket) — never in between.
+        async with self._watchlist_lock:
+            # New session: the previous session's ack no longer describes what
+            # Alpaca is delivering. Clear it so health/tools never report
+            # symbols the current connection hasn't acknowledged (trust acks,
+            # not requests).
+            self._acknowledged = None
+            # Replay the full desired subscription; the ack arrives via the
+            # receive loop (handle_item) so we don't block here.
+            await self._send_subscription(ws, "subscribe", sorted(self._watchlist))
+            self._state.update_health(
+                self.stream_name,
+                requested_subscription={
+                    c: sorted(self._watchlist) for c in self._channels
+                },
+                acknowledged_subscription=None,
+                subscription_mode="watchlist",
+            )
 
     async def handle_item(self, ws: Any, item: dict[str, Any]) -> bool:
         t = item.get("T")

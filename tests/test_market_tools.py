@@ -358,3 +358,16 @@ async def test_context_tools_without_client(app):
     assert out["error"] == "market_client_unavailable"
     out = await _call(mcp, "get_corporate_actions")
     assert out["error"] == "market_client_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_invalid_dates_return_structured_errors(app_with_client):
+    """A malformed caller-supplied date must be a structured error, not a
+    silent fallback to the default window (valid-looking data, wrong dates)."""
+    mcp = build_mcp()
+    cal = await _call(mcp, "get_market_calendar", start="2026-13-01")
+    assert cal == {"error": "invalid_date", "field": "start", "value": "2026-13-01"}
+    ca = await _call(mcp, "get_corporate_actions", end="not-a-date")
+    assert ca == {"error": "invalid_date", "field": "end", "value": "not-a-date"}
+    bars = await _call(mcp, "get_stock_bars", symbol="AAPL", start="garbage")
+    assert bars == {"error": "invalid_date", "field": "start", "value": "garbage"}
