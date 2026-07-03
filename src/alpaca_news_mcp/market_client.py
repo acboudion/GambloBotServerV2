@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -40,6 +42,25 @@ MAX_BARS_PAGES = 40
 
 class MarketDataError(RuntimeError):
     """A REST request that callers must not silently treat as success."""
+
+
+def retry_after_seconds(value: str | None, *, default: float) -> float:
+    """Parse a Retry-After header: delta-seconds or HTTP-date (RFC 9110).
+    Malformed values fall back to `default` — a 429 response must never
+    crash the request path with a ValueError."""
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return default
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return max(0.0, (dt - datetime.now(UTC)).total_seconds())
 
 
 class TTLCache:
@@ -128,7 +149,9 @@ class MarketDataClient:
                 log.warning("market client request failed %s: %s", path, e)
                 return None
             if resp.status_code == 429 and attempt == 1:
-                retry_after = float(resp.headers.get("Retry-After", "1") or 1)
+                retry_after = retry_after_seconds(
+                    resp.headers.get("Retry-After"), default=1.0
+                )
                 await asyncio.sleep(min(retry_after, 10.0))
                 continue
             if resp.status_code >= 400:

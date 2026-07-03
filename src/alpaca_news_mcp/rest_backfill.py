@@ -12,6 +12,7 @@ import httpx
 from .alerts import AlertEngine
 from .config import Config
 from .logging_utils import get_logger
+from .market_client import retry_after_seconds
 from .normalize import NormalizationError, normalize_news_message
 from .state import State
 from .store import Store
@@ -180,7 +181,9 @@ class RestBackfillWorker:
                         self._state.update_health(last_error="rest 429 retry budget exhausted")
                         failure = "429 retry budget exhausted"
                         break
-                    retry_after = float(resp.headers.get("Retry-After", "0") or 0)
+                    retry_after = retry_after_seconds(
+                        resp.headers.get("Retry-After"), default=0.0
+                    )
                     wait = retry_after if retry_after > 0 else backoff
                     backoff = min(backoff * 2, 60.0)
                     log.warning(

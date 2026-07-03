@@ -266,7 +266,11 @@ class BaseStreamWorker:
                 # it in the alert feed, not just in logs.
                 auth_failures += 1
                 self._state.update_health(self.stream_name, auth_failed=True)
-                if auth_failures == 1 or auth_failures % self._config.auth_alert_every_n == 0:
+                # A non-positive AUTH_ALERT_EVERY_N disables repeated alerts
+                # (first failure still alerts) — it must not ZeroDivisionError
+                # the stream task out of its slow retry cadence.
+                every_n = self._config.auth_alert_every_n
+                if auth_failures == 1 or (every_n > 0 and auth_failures % every_n == 0):
                     await self._record_stream_error_alert(
                         code=402,
                         message=(

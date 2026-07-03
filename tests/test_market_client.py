@@ -194,3 +194,33 @@ async def test_latest_and_snapshots_send_configured_feed(client):
     )
     await client.snapshots(["AAPL"])
     assert snap_route.calls[0].request.url.params["feed"] == "sip"
+
+
+def test_retry_after_seconds_handles_all_header_forms():
+    """delta-seconds, HTTP-date, and malformed values must all yield a bounded
+    float — a 429 must never crash the request path with ValueError."""
+    from alpaca_news_mcp.market_client import retry_after_seconds
+
+    assert retry_after_seconds("2", default=1.0) == 2.0
+    assert retry_after_seconds(None, default=1.0) == 1.0
+    assert retry_after_seconds("", default=1.0) == 1.0
+    # HTTP-date in the past clamps to 0 (retry immediately).
+    assert retry_after_seconds("Wed, 21 Oct 2015 07:28:00 GMT", default=1.0) == 0.0
+    # Malformed → default, not ValueError.
+    assert retry_after_seconds("soon", default=3.0) == 3.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_429_with_http_date_retry_after_does_not_crash(client):
+    """A 429 carrying an HTTP-date Retry-After must retry (not raise), so MCP
+    tools keep returning structured errors instead of exceptions."""
+    route = respx.get("https://data.alpaca.markets/v1beta1/screener/stocks/movers")
+    route.side_effect = [
+        httpx.Response(
+            429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        ),
+        httpx.Response(200, json={"gainers": [], "losers": []}),
+    ]
+    out = await client.movers(top=5)
+    assert out == {"gainers": [], "losers": []}

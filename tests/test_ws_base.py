@@ -284,3 +284,48 @@ async def test_ws_published_before_subscription_replay(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_auth_alert_every_n_zero_does_not_crash_retry_loop(wired):
+    """AUTH_ALERT_EVERY_N=0 disables repeated alerts — the second consecutive
+    402 must not ZeroDivisionError the stream task out of its retry cadence."""
+    cfg, store, state, alerts = wired
+    connections = 0
+
+    async def handler(ws):
+        nonlocal connections
+        connections += 1
+        await ws.send(orjson.dumps([{"T": "success", "msg": "connected"}]).decode())
+        await ws.send(
+            orjson.dumps([{"T": "error", "code": 402, "msg": "auth failed"}]).decode()
+        )
+        try:
+            await ws.recv()
+            await ws.send(
+                orjson.dumps([{"T": "error", "code": 402, "msg": "auth failed"}]).decode()
+            )
+        except websockets.exceptions.ConnectionClosed:
+            return
+        await asyncio.sleep(1)
+
+    server, port = await _start_fake_ws(handler)
+    cfg2 = replace(
+        cfg,
+        alpaca_news_stream_url=f"ws://127.0.0.1:{port}/news",
+        auth_retry_seconds=1,
+        auth_alert_every_n=0,
+    )
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    try:
+        await worker.start()
+        # Reaching a third connection proves the loop survived the second
+        # failure (where the modulo used to divide by zero).
+        assert await _wait_for(lambda: connections >= 3, deadline_s=15.0)
+        stored = await store.get_alerts(minutes=5, categories=["stream_error"], limit=50)
+        # First failure still alerts; no periodic re-alerts required.
+        assert any("authentication failing" in a.reason for a in stored)
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()
