@@ -24,6 +24,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from . import market_tools as market_tools_mod
+from . import poll_tools as poll_tools_mod
 from . import resources as resources_mod
 from . import tools as tools_mod
 from .alerts import AlertEngine
@@ -200,9 +201,10 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
         instructions=(
             "Real-time Alpaca market data: news stream + v2 stock stream "
             "(trades/quotes/bars/halts) with bounded read-only MCP tools. "
-            "Prefer the delta-cursor tools (get_news_since, get_alerts_since, "
-            "get_bars_since) for polling loops. One Alpaca WS per endpoint per "
-            "container; no trading endpoints."
+            "Call get_started once for orientation, then poll_market once "
+            "per loop tick (combined news/alerts/bars deltas + snapshot + "
+            "loop context). One Alpaca WS per endpoint per container; no "
+            "trading endpoints."
         ),
         json_response=True,
         stateless_http=True,
@@ -212,6 +214,7 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
     resources_mod.register(mcp)
     market_tools_mod.register(mcp)
     market_tools_mod.register_resources(mcp)
+    poll_tools_mod.register(mcp)
     return mcp
 
 
