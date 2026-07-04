@@ -309,6 +309,17 @@ class MarketStore:
         await cur.close()
         return [dict(r) for r in rows]
 
+    @property
+    def latest_bar_cursor(self) -> int:
+        """Highest allocated bar seq; see Store.latest_article_cursor."""
+        return self._next_bar_seq - 1
+
+    async def min_bar_seq(self) -> int:
+        cur = await self.rconn.execute("SELECT COALESCE(MIN(seq), 0) FROM stock_bars")
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else 0
+
     async def bars_since(
         self,
         *,

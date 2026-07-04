@@ -49,6 +49,30 @@ def _invalid_fields(fields: str) -> dict[str, Any]:
     return {"error": "invalid_fields", "fields": fields, "valid": list(VALID_FIELD_MODES)}
 
 
+def _cursor_out_of_range(cursor: int, latest: int) -> dict[str, Any]:
+    """A cursor above the allocation high-water mark can never return data
+    (stale bot state, or a swapped database) — starving silently would look
+    identical to 'no news', so it must be a structured, recoverable error."""
+    return {
+        "error": "cursor_out_of_range",
+        "cursor": cursor,
+        "latest_cursor": latest,
+        "hint": "pass latest_cursor back (or cursor=-1) to resume from the tail",
+    }
+
+
+def _tail_response(items_key: str, latest: int) -> dict[str, Any]:
+    """cursor=-1 bootstrap: subscribe from now without replaying history."""
+    return {
+        "count": 0,
+        items_key: [],
+        "next_cursor": latest,
+        "latest_cursor": latest,
+        "has_more": False,
+        "note": "started_from_tail",
+    }
+
+
 def _serialize_article(
     article: Any,
     *,
@@ -160,8 +184,11 @@ def register(mcp: FastMCP) -> None:
         description=(
             "Delta poll: news articles newer than `cursor` (a monotonic ingest "
             "sequence), oldest first. Returns next_cursor to pass back on the "
-            "next call; has_more=true means call again immediately. Start with "
-            "cursor=0 to begin from the oldest retained article. Updated "
+            "next call; has_more=true means call again immediately. cursor=0 "
+            "starts from the oldest retained article; cursor=-1 starts from "
+            "the tail (only future articles). latest_cursor is always "
+            "included; gap=true means articles between your cursor and "
+            "oldest_available_cursor were pruned by retention. Updated "
             "articles re-surface with a fresh cursor position."
         )
     )
@@ -178,8 +205,13 @@ def register(mcp: FastMCP) -> None:
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
         limit = min(max(1, limit), MAX_CURSOR_ITEMS)
-        cursor = max(0, cursor)
         app = get_app_state()
+        latest = app.store.latest_article_cursor
+        if cursor == -1:
+            return _tail_response("articles", latest)
+        cursor = max(0, cursor)
+        if cursor > latest:
+            return _cursor_out_of_range(cursor, latest)
         articles, next_cursor, has_more = await app.store.articles_since(
             cursor=cursor, limit=limit, symbols=symbols
         )
@@ -188,18 +220,27 @@ def register(mcp: FastMCP) -> None:
             d = _serialize_article(a, fields=fields)
             d["seq"] = a.seq
             serialized.append(d)
-        return {
+        out: dict[str, Any] = {
             "count": len(serialized),
             "articles": serialized,
             "next_cursor": next_cursor,
+            "latest_cursor": latest,
             "has_more": has_more,
         }
+        if cursor:
+            min_seq = await app.store.min_article_seq()
+            if min_seq and cursor < min_seq - 1:
+                out["gap"] = True
+                out["oldest_available_cursor"] = min_seq - 1
+        return out
 
     @mcp.tool(
         description=(
             "Delta poll: alerts newer than `cursor`, oldest first. Each alert "
             "carries its own `cursor`; pass next_cursor back on the next call. "
-            "has_more=true means call again immediately."
+            "has_more=true means call again immediately. cursor=-1 starts "
+            "from the tail (only future alerts); latest_cursor is always "
+            "included; gap=true means alerts were pruned past your cursor."
         )
     )
     async def get_alerts_since(
@@ -213,17 +254,29 @@ def register(mcp: FastMCP) -> None:
         if (over := _filter_over_cap(categories)) is not None:
             return over
         limit = min(max(1, limit), MAX_CURSOR_ITEMS)
-        cursor = max(0, cursor)
         app = get_app_state()
+        latest = app.store.latest_alert_cursor
+        if cursor == -1:
+            return _tail_response("alerts", latest)
+        cursor = max(0, cursor)
+        if cursor > latest:
+            return _cursor_out_of_range(cursor, latest)
         alerts, next_cursor, has_more = await app.store.alerts_since(
             cursor=cursor, limit=limit, severity=severity, categories=categories
         )
-        return {
+        out: dict[str, Any] = {
             "count": len(alerts),
             "alerts": alerts,
             "next_cursor": next_cursor,
+            "latest_cursor": latest,
             "has_more": has_more,
         }
+        if cursor:
+            min_seq = await app.store.min_alert_seq()
+            if min_seq and cursor < min_seq - 1:
+                out["gap"] = True
+                out["oldest_available_cursor"] = min_seq - 1
+        return out
 
     @mcp.tool(description="Get a single news article by Alpaca id, optionally with version history.")
     async def get_news_article(

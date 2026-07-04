@@ -62,6 +62,16 @@ def _upstream_error() -> dict[str, Any]:
     return {"error": "alpaca_request_failed"}
 
 
+def _cursor_out_of_range(cursor: int, latest: int) -> dict[str, Any]:
+    """See tools._cursor_out_of_range — same contract for bar cursors."""
+    return {
+        "error": "cursor_out_of_range",
+        "cursor": cursor,
+        "latest_cursor": latest,
+        "hint": "pass latest_cursor back (or cursor=-1) to resume from the tail",
+    }
+
+
 def _parse_date(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -345,8 +355,11 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         description=(
             "Delta poll: bars newer than `cursor` (monotonic; updated bars "
-            "re-surface). Compact rows: [symbol, timeframe, ts, o, h, l, c, v, n, vw, seq]. "
-            "Pass next_cursor back on the next call."
+            "re-surface). Compact rows: [symbol, timeframe, ts, o, h, l, c, v, n, vw, seq]; "
+            "`ts` is the bar start in epoch SECONDS (UTC). Pass next_cursor "
+            "back on the next call. cursor=-1 starts from the tail (only "
+            "future bars); latest_cursor is always included; gap=true means "
+            "bars were pruned past your cursor."
         )
     )
     async def get_bars_since(
@@ -368,13 +381,26 @@ def register(mcp: FastMCP) -> None:
             return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
         if timeframe is not None and timeframe not in VALID_TIMEFRAMES:
             return {"error": "invalid_timeframe", "valid": list(VALID_TIMEFRAMES)}
+        latest = market_store.latest_bar_cursor
+        if cursor == -1:
+            return {
+                "count": 0,
+                "bars": [],
+                "next_cursor": latest,
+                "latest_cursor": latest,
+                "has_more": False,
+                "note": "started_from_tail",
+            }
+        cursor = max(0, cursor)
+        if cursor > latest:
+            return _cursor_out_of_range(cursor, latest)
         rows, next_cursor, has_more = await market_store.bars_since(
-            cursor=max(0, cursor),
+            cursor=cursor,
             limit=max(1, limit),
             symbols=symbols,
             timeframe=timeframe,
         )
-        return {
+        out: dict[str, Any] = {
             "count": len(rows),
             "columns": [
                 "symbol", "timeframe", "ts", "open", "high", "low", "close",
@@ -386,8 +412,15 @@ def register(mcp: FastMCP) -> None:
                 for r in rows
             ],
             "next_cursor": next_cursor,
+            "latest_cursor": latest,
             "has_more": has_more,
         }
+        if cursor:
+            min_seq = await market_store.min_bar_seq()
+            if min_seq and cursor < min_seq - 1:
+                out["gap"] = True
+                out["oldest_available_cursor"] = min_seq - 1
+        return out
 
     # ---- halts ------------------------------------------------------------------------------
 

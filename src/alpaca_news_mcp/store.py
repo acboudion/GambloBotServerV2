@@ -848,6 +848,32 @@ class Store:
         await cur.close()
         return [self._row_to_article(r) for r in rows]
 
+    @property
+    def latest_article_cursor(self) -> int:
+        """Highest allocated article seq — 'pass this to receive only new
+        rows'. Uses the allocator (not table MAX) so it stays meaningful
+        after retention empties the table; future rows always allocate
+        above it."""
+        return self._next_seq - 1
+
+    @property
+    def latest_alert_cursor(self) -> int:
+        return self._next_alert_seq - 1
+
+    async def min_article_seq(self) -> int:
+        cur = await self.rconn.execute(
+            "SELECT COALESCE(MIN(seq), 0) FROM news_articles"
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else 0
+
+    async def min_alert_seq(self) -> int:
+        cur = await self.rconn.execute("SELECT COALESCE(MIN(seq), 0) FROM alerts")
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else 0
+
     async def articles_since(
         self,
         *,
