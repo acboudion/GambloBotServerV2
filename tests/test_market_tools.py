@@ -545,3 +545,30 @@ async def test_market_pulse_checks_halts_beyond_first_50_candidates(app, monkeyp
     assert out["count"] > 50
     by_symbol = {c["symbol"]: c for c in out["candidates"]}
     assert by_symbol["ZZT60"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_market_pulse_sees_halts_older_than_four_hours(app, monkeypatch):
+    """News-pending/regulatory halts can outlive a 4h window; the halt check
+    spans the full status retention so an old, un-resumed halt still flags."""
+    ten_hours_ago = int(
+        (datetime.now(UTC) - timedelta(hours=10)).timestamp() * 1_000_000
+    )
+    await app.market_store.persist_stream_batch(
+        statuses=[("OLDH", ten_hours_ago, "H", "Trading Halt", "T1", "News", "C")]
+    )
+
+    class _Client:
+        async def movers(self, top=10):
+            return {"gainers": [{"symbol": "OLDH", "price": 5.0,
+                                 "percent_change": 12.0, "volume": 100}],
+                    "losers": []}
+
+        async def most_actives(self, by="volume", top=10):
+            return {"most_actives": []}
+
+    monkeypatch.setattr(app, "market_client", _Client())
+    mcp = build_mcp()
+    out = await _call(mcp, "get_market_pulse", top=10)
+    assert out["candidates"][0]["symbol"] == "OLDH"
+    assert out["candidates"][0]["halted"] is True

@@ -888,11 +888,17 @@ def register(mcp: FastMCP) -> None:
             # gainers + losers + most-actives can exceed one query's symbol
             # cap; chunk so EVERY candidate gets a real halt check — a
             # discovery tool must never present a halted name as tradable.
+            # The window spans the full status retention: news-pending and
+            # regulatory halts routinely outlive a 4-hour slice, and the
+            # newest retained status per symbol is the current state.
+            status_window_minutes = app.config.status_retention_days * 1440
             latest_status: dict[str, str] = {}
             all_candidates = list(candidates)
             for i in range(0, len(all_candidates), 50):
                 statuses = await app.market_store.recent_statuses(
-                    minutes=240, symbols=all_candidates[i : i + 50], limit=200
+                    minutes=status_window_minutes,
+                    symbols=all_candidates[i : i + 50],
+                    limit=500,
                 )
                 for st in statuses:  # newest first per chunk
                     latest_status.setdefault(

@@ -94,6 +94,14 @@ class MarketDataClient:
         self._data_client: httpx.AsyncClient | None = None
         self._trading_client: httpx.AsyncClient | None = None
 
+    def _rest_feed(self) -> str | None:
+        """Feed param for REST requests. The smoke-test stream feed has no
+        REST counterpart (Alpaca's REST feed enum is sip/iex/delayed_sip) —
+        omit the param so Alpaca picks the account default instead of
+        failing every snapshot/latest/bars call with 400s."""
+        feed = self._config.alpaca_stock_feed
+        return None if feed == "test" else feed
+
     def _headers(self) -> dict[str, str]:
         return {
             "APCA-API-KEY-ID": self._config.alpaca_api_key,
@@ -230,13 +238,16 @@ class MarketDataClient:
     async def snapshots(self, symbols: list[str]) -> dict[str, Any] | None:
         # Pin to the configured stream feed so REST snapshots can't mix a
         # different feed into responses alongside stream-cached data.
-        feed = self._config.alpaca_stock_feed
+        feed = self._rest_feed()
         joined = ",".join(sorted({s.upper() for s in symbols}))
+        params: dict[str, Any] = {"symbols": joined}
+        if feed:
+            params["feed"] = feed
         return await self._get_json(
             host="data",
             path=SNAPSHOTS_PATH,
-            params={"symbols": joined, "feed": feed},
-            cache_key=f"snapshots:{feed}:{joined}",
+            params=params,
+            cache_key=f"snapshots:{feed or 'default'}:{joined}",
             ttl=self._config.market_cache_snapshot_ttl,
         )
 
@@ -247,13 +258,16 @@ class MarketDataClient:
         path = LATEST_PATHS.get(kind)
         if path is None:
             raise ValueError(f"invalid latest kind: {kind}")
-        feed = self._config.alpaca_stock_feed
+        feed = self._rest_feed()
         joined = ",".join(sorted({s.upper() for s in symbols}))
+        params: dict[str, Any] = {"symbols": joined}
+        if feed:
+            params["feed"] = feed
         return await self._get_json(
             host="data",
             path=path,
-            params={"symbols": joined, "feed": feed},
-            cache_key=f"latest:{kind}:{feed}:{joined}",
+            params=params,
+            cache_key=f"latest:{kind}:{feed or 'default'}:{joined}",
             ttl=self._config.market_cache_latest_ttl,
         )
 
@@ -319,8 +333,10 @@ class MarketDataClient:
             "timeframe": timeframe,
             "start": start_iso,
             "limit": limit_per_page,
-            "feed": feed or self._config.alpaca_stock_feed,
         }
+        resolved_feed = feed or self._rest_feed()
+        if resolved_feed:
+            params["feed"] = resolved_feed
         if end_iso:
             params["end"] = end_iso
         pages = 0

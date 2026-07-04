@@ -230,3 +230,22 @@ async def test_snapshot_section_flags_truncation(tmp_path, monkeypatch):
         await market_store.close()
         NewsStreamWorker.reset_singleton()
         StockStreamWorker.reset_singleton()
+
+
+def test_market_phase_holiday_is_closed_not_extended_hours():
+    """A weekday holiday (clock closed, next_open on a future day) must not
+    read as premarket/afterhours — there is no session to trade around."""
+    # 2026-07-03 was a Friday US market holiday; 13:00 UTC = 09:00 ET.
+    holiday_morning = datetime(2026, 7, 3, 13, 0, tzinfo=UTC)
+    clock = {"is_open": False, "next_open": "2026-07-06T13:30:00Z"}
+    assert market_phase(clock, holiday_morning) == "closed"
+    # Same wall-clock time with the market opening later today -> premarket.
+    normal = {"is_open": False, "next_open": "2026-07-08T13:30:00Z"}
+    weekday_morning = datetime(2026, 7, 8, 13, 0, tzinfo=UTC)
+    assert market_phase(normal, weekday_morning) == "premarket"
+    # Calendar says no session today: even the afterhours window is closed.
+    holiday_evening = datetime(2026, 7, 3, 21, 0, tzinfo=UTC)
+    assert market_phase({"is_open": False}, holiday_evening, trading_day=False) == "closed"
+    # Ordinary evening with a session today stays afterhours.
+    assert market_phase({"is_open": False}, datetime(2026, 7, 8, 21, 0, tzinfo=UTC),
+                        trading_day=True) == "afterhours"

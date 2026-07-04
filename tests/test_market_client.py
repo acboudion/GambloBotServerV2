@@ -235,3 +235,39 @@ async def test_non_json_body_returns_none_not_exception(client):
         return_value=httpx.Response(200, text="<html>gateway error</html>")
     )
     assert await client.movers(top=5) is None
+
+
+@pytest.mark.asyncio
+async def test_rest_requests_omit_test_feed(tmp_path, monkeypatch):
+    """ALPACA_STOCK_FEED=test is stream-only — REST snapshots/latest/bars
+    must omit the feed param (Alpaca's REST enum has no 'test') instead of
+    failing every call with 400s during smoke tests."""
+    import httpx
+    import respx
+
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "x.sqlite"))
+    monkeypatch.setenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.example")
+    monkeypatch.setenv("ALPACA_STOCK_FEED", "test")
+    cfg = Config.from_env()
+    client = MarketDataClient(cfg)
+    seen: list[dict] = []
+
+    def responder(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"trades": {}, "bars": {}})
+
+    try:
+        with respx.mock(base_url="https://data.alpaca.example") as mock:
+            mock.get("/v2/stocks/snapshots").mock(side_effect=responder)
+            mock.get("/v2/stocks/trades/latest").mock(side_effect=responder)
+            mock.get("/v2/stocks/bars").mock(side_effect=responder)
+            await client.snapshots(["AAPL"])
+            await client.latest("trades", ["AAPL"])
+            await client.bars(["AAPL"], start_iso="2026-07-04T00:00:00+00:00")
+        assert seen, "no requests captured"
+        for params in seen:
+            assert "feed" not in params, params
+    finally:
+        await client.close()

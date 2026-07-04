@@ -189,10 +189,19 @@ def _snapshot_section(app: AppState, symbols: list[str] | None) -> dict[str, Any
     return section
 
 
-def market_phase(clock: dict[str, Any] | None, now: datetime) -> str:
+def market_phase(
+    clock: dict[str, Any] | None,
+    now: datetime,
+    trading_day: bool | None = None,
+) -> str:
     """open | premarket | afterhours | closed | unknown. Extended-hours
     classification uses Eastern wall-clock time (4:00-9:30 pre, 16:00-20:00
-    post) and only applies on days the market actually opens/opened."""
+    post) and only applies on days the market actually opens/opened —
+    weekday holidays must not read as premarket/afterhours.
+
+    trading_day: whether today's calendar has a session (None = unknown;
+    the wall-clock heuristic then applies for afterhours, and premarket is
+    still guarded by the clock's next_open date)."""
     if not clock:
         return "unknown"
     if clock.get("is_open"):
@@ -201,9 +210,14 @@ def market_phase(clock: dict[str, Any] | None, now: datetime) -> str:
         return "closed"
     et = now.astimezone(_EASTERN)
     minutes = et.hour * 60 + et.minute
-    if et.weekday() >= 5:
+    if et.weekday() >= 5 or trading_day is False:
         return "closed"
     if 4 * 60 <= minutes < 9 * 60 + 30:
+        # Premarket only exists if the market opens later TODAY — on a
+        # holiday morning the clock's next_open points at a future day.
+        next_open = _parse_iso(clock.get("next_open"))
+        if next_open is not None and next_open.astimezone(_EASTERN).date() != et.date():
+            return "closed"
         return "premarket"
     if 16 * 60 <= minutes < 20 * 60:
         return "afterhours"
@@ -215,7 +229,21 @@ async def loop_context(app: AppState) -> dict[str, Any]:
     clock: dict[str, Any] | None = None
     if app.market_client is not None:
         clock = await app.market_client.clock()  # 15s TTL cache — no REST spam
-    phase = market_phase(clock, now)
+    trading_day: bool | None = None
+    if (
+        clock is not None
+        and not clock.get("is_open")
+        and app.market_client is not None
+        and _EASTERN is not None
+    ):
+        # Only consulted while closed, and the calendar is TTL-cached for
+        # hours — distinguishes a weekday holiday (no extended-hours
+        # sessions at all) from an ordinary evening/morning.
+        et_today = now.astimezone(_EASTERN).date().isoformat()
+        cal = await app.market_client.calendar(start=et_today, end=et_today)
+        if cal is not None:
+            trading_day = len(cal) > 0
+    phase = market_phase(clock, now, trading_day)
 
     seconds_to_open: int | None = None
     seconds_to_close: int | None = None
