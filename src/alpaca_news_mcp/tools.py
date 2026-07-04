@@ -6,12 +6,45 @@ only). No tool ever opens an Alpaca WebSocket — they all read from the local s
 
 from __future__ import annotations
 
+from datetime import UTC, timedelta
 from typing import Any
 
+from dateutil import parser as dateparser
 from mcp.server.fastmcp import FastMCP
 
 from .app_state import get_app_state
 from .normalize import truncate
+from .tool_common import (
+    ALERT_CATEGORIES,
+    SEVERITIES,
+    VALID_FIELD_MODES,
+    filter_over_cap,
+    severities_at_or_above,
+)
+from .tool_common import (
+    cursor_out_of_range as _cursor_out_of_range,
+)
+from .tool_common import (
+    err as _err,
+)
+from .tool_common import (
+    invalid_categories as _invalid_categories,
+)
+from .tool_common import (
+    invalid_date as _invalid_date,
+)
+from .tool_common import (
+    invalid_fields as _invalid_fields,
+)
+from .tool_common import (
+    invalid_severity as _invalid_severity,
+)
+from .tool_common import (
+    limit_exceeded as _limit_exceeded,
+)
+from .tool_common import (
+    tail_response as _tail_response,
+)
 
 # Bounded-output defaults from spec §20
 MAX_ARTICLES_DEFAULT = 50
@@ -25,53 +58,44 @@ MAX_CONTENT_CHARS = 4000
 MAX_CURSOR_ITEMS = 500
 MAX_SYMBOLS_PER_LOOKUP = 50
 MAX_INTEREST_SYMBOLS = 200
-
-VALID_FIELD_MODES = ("compact", "standard", "full")
-
-
-def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
-    return {
-        "error": "limit_exceeded",
-        "max_allowed": max_allowed,
-        "requested": requested,
-    }
+MAX_SYMBOL_MAP_DEFAULT = 100
+MAX_SYMBOL_MAP_HARD = 500
+MAX_SYMBOL_MAP_MINUTES = 10_080  # 7 days
 
 
 def _filter_over_cap(values: list[str] | None) -> dict[str, Any] | None:
-    """Optional list filters (symbols/categories/sources) become one SQL
-    placeholder each — reject oversized lists structurally instead of
-    exceeding SQLite's variable limit and raising out of the tool."""
-    if values and len(values) > MAX_SYMBOLS_PER_LOOKUP:
-        return _limit_exceeded(MAX_SYMBOLS_PER_LOOKUP, len(values))
+    return filter_over_cap(values, MAX_SYMBOLS_PER_LOOKUP)
+
+
+def _validate_alert_filters(
+    severity: str | None, categories: list[str] | None
+) -> dict[str, Any] | None:
+    """A typo'd severity/category silently returned zero alerts — exactly
+    what 'nothing happened' looks like. Validate against the real enums."""
+    if severity is not None and severity not in SEVERITIES:
+        return _invalid_severity(severity)
+    if categories:
+        bad = [c for c in categories if c not in ALERT_CATEGORIES]
+        if bad:
+            return _invalid_categories(bad)
     return None
 
 
-def _invalid_fields(fields: str) -> dict[str, Any]:
-    return {"error": "invalid_fields", "fields": fields, "valid": list(VALID_FIELD_MODES)}
-
-
-def _cursor_out_of_range(cursor: int, latest: int) -> dict[str, Any]:
-    """A cursor above the allocation high-water mark can never return data
-    (stale bot state, or a swapped database) — starving silently would look
-    identical to 'no news', so it must be a structured, recoverable error."""
-    return {
-        "error": "cursor_out_of_range",
-        "cursor": cursor,
-        "latest_cursor": latest,
-        "hint": "pass latest_cursor back (or cursor=-1) to resume from the tail",
-    }
-
-
-def _tail_response(items_key: str, latest: int) -> dict[str, Any]:
-    """cursor=-1 bootstrap: subscribe from now without replaying history."""
-    return {
-        "count": 0,
-        items_key: [],
-        "next_cursor": latest,
-        "latest_cursor": latest,
-        "has_more": False,
-        "note": "started_from_tail",
-    }
+def _parse_window_bound(field: str, value: str, *, end_of_day: bool) -> str | dict[str, Any]:
+    """Parse a since/until filter to the canonical stored ISO form
+    ('+00:00' offset). A date-only `until` is pushed to end-of-day so
+    '2026-07-04' includes July 4th instead of lexicographically excluding
+    the entire day."""
+    try:
+        dt = dateparser.isoparse(value)
+    except (ValueError, TypeError):
+        return _invalid_date(field, value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    dt = dt.astimezone(UTC)
+    if end_of_day and len(value.strip()) == 10:
+        dt = dt + timedelta(days=1) - timedelta(microseconds=1)
+    return dt.isoformat()
 
 
 def _serialize_article(
@@ -162,8 +186,7 @@ def register(mcp: FastMCP) -> None:
             return over
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
-        limit = min(max(1, limit), MAX_ARTICLES_DEFAULT if limit <= 0 else limit)
-        limit = min(limit, MAX_ARTICLES_HARD)
+        limit = MAX_ARTICLES_DEFAULT if limit <= 0 else min(limit, MAX_ARTICLES_HARD)
         app = get_app_state()
         articles = await app.store.get_recent_articles(
             minutes=minutes, symbols=symbols, sources=sources, limit=limit
@@ -241,19 +264,35 @@ def register(mcp: FastMCP) -> None:
             "carries its own `cursor`; pass next_cursor back on the next call. "
             "has_more=true means call again immediately. cursor=-1 starts "
             "from the tail (only future alerts); latest_cursor is always "
-            "included; gap=true means alerts were pruned past your cursor."
+            "included; gap=true means alerts were pruned past your cursor. "
+            "severity is exact-match; min_severity='high' means high AND "
+            "critical."
         )
     )
     async def get_alerts_since(
         cursor: int = 0,
         limit: int = 100,
         severity: str | None = None,
+        min_severity: str | None = None,
         categories: list[str] | None = None,
     ) -> dict[str, Any]:
         if limit > MAX_CURSOR_ITEMS:
             return _limit_exceeded(MAX_CURSOR_ITEMS, limit)
         if (over := _filter_over_cap(categories)) is not None:
             return over
+        if (bad := _validate_alert_filters(severity, categories)) is not None:
+            return bad
+        if min_severity is not None and min_severity not in SEVERITIES:
+            return _invalid_severity(min_severity)
+        if severity is not None and min_severity is not None:
+            return _err(
+                "conflicting_filters",
+                "pass either severity (exact match) or min_severity "
+                "(that level and above), not both",
+            )
+        severities = (
+            severities_at_or_above(min_severity) if min_severity is not None else None
+        )
         limit = min(max(1, limit), MAX_CURSOR_ITEMS)
         app = get_app_state()
         latest = app.store.latest_alert_cursor
@@ -263,7 +302,11 @@ def register(mcp: FastMCP) -> None:
         if cursor > latest:
             return _cursor_out_of_range(cursor, latest)
         alerts, next_cursor, has_more = await app.store.alerts_since(
-            cursor=cursor, limit=limit, severity=severity, categories=categories
+            cursor=cursor,
+            limit=limit,
+            severity=severity,
+            severities=severities,
+            categories=categories,
         )
         out: dict[str, Any] = {
             "count": len(alerts),
@@ -292,7 +335,7 @@ def register(mcp: FastMCP) -> None:
         app = get_app_state()
         article = await app.store.get_article(article_id)
         if article is None:
-            return {"error": "not_found", "article_id": article_id}
+            return _err("not_found", "no article with this Alpaca id is stored locally", article_id=article_id)
         result: dict[str, Any] = _serialize_article(
             article, include_content=include_content, include_raw=include_raw
         )
@@ -305,7 +348,13 @@ def register(mcp: FastMCP) -> None:
             result["versions_total"] = versions_total
         return result
 
-    @mcp.tool(description="Search persisted news articles by headline/summary/content text.")
+    @mcp.tool(
+        description=(
+            "Search persisted news articles by headline/summary/content text "
+            "(FTS ranked). since/until: ISO-8601 or YYYY-MM-DD (a date-only "
+            "until includes that whole day)."
+        )
+    )
     async def search_news(
         query: str,
         symbols: list[str] | None = None,
@@ -322,7 +371,17 @@ def register(mcp: FastMCP) -> None:
         if fields not in VALID_FIELD_MODES:
             return _invalid_fields(fields)
         if not query or not query.strip():
-            return {"error": "empty_query"}
+            return _err("empty_query", "pass one or more search terms")
+        if since is not None:
+            parsed = _parse_window_bound("since", since, end_of_day=False)
+            if isinstance(parsed, dict):
+                return parsed
+            since = parsed
+        if until is not None:
+            parsed = _parse_window_bound("until", until, end_of_day=True)
+            if isinstance(parsed, dict):
+                return parsed
+            until = parsed
         app = get_app_state()
         articles = await app.store.search_articles(
             query=query.strip(),
@@ -348,7 +407,7 @@ def register(mcp: FastMCP) -> None:
         fields: str = "standard",
     ) -> dict[str, Any]:
         if not symbols:
-            return {"error": "no_symbols"}
+            return _err("no_symbols", "pass at least one ticker symbol")
         # One query per symbol and up to limit_per_symbol rows each — an
         # unbounded symbol list would multiply past the bounded-response
         # contract (500 symbols x 25 = 12,500 articles).
@@ -373,7 +432,14 @@ def register(mcp: FastMCP) -> None:
             ]
         return {"symbols": out}
 
-    @mcp.tool(description="Compact digest of recent breaking-keyword/critical news.")
+    @mcp.tool(
+        description=(
+            "Compact digest of recent breaking-keyword/critical news. Returns "
+            "only articles matching breaking markers; breaking_matches=false "
+            "with an empty list means nothing breaking happened (use "
+            "get_recent_news for ordinary coverage)."
+        )
+    )
     async def get_breaking_news_digest(
         minutes: int = 15,
         symbols: list[str] | None = None,
@@ -393,17 +459,18 @@ def register(mcp: FastMCP) -> None:
             sources=None,
             limit=max_articles,
         )
-        # Filter to breaking-style markers
+        # Filter to breaking-style markers. No silent fallback to ordinary
+        # recent news: a digest that substitutes routine articles when
+        # nothing matches presents non-breaking news as breaking.
         breaking_terms = ("breaking", "halted", "delisting", "bankruptcy", "alert:", "developing")
         filtered = []
         for a in articles:
             text = " ".join(filter(None, [a.headline, a.summary, a.content_text])).lower()
             if any(term in text for term in breaking_terms):
                 filtered.append(a)
-        if not filtered:
-            filtered = articles[: max_articles]
         return {
             "count": len(filtered),
+            "breaking_matches": bool(filtered),
             "articles": [
                 {
                     "id": a.id,
@@ -430,7 +497,7 @@ def register(mcp: FastMCP) -> None:
         symbols: list[str], mode: str = "replace"
     ) -> dict[str, Any]:
         if mode not in ("replace", "add", "remove", "clear"):
-            return {"error": "invalid_mode", "mode": mode}
+            return _err("invalid_mode", "use one of: replace, add, remove, clear", mode=mode)
         if len(symbols) > MAX_INTEREST_SYMBOLS:
             return _limit_exceeded(MAX_INTEREST_SYMBOLS, len(symbols))
         app = get_app_state()
@@ -461,6 +528,8 @@ def register(mcp: FastMCP) -> None:
             return over
         if (over := _filter_over_cap(categories)) is not None:
             return over
+        if (bad := _validate_alert_filters(severity, categories)) is not None:
+            return bad
         app = get_app_state()
         alerts = await app.store.get_alerts(
             minutes=minutes,
@@ -477,13 +546,39 @@ def register(mcp: FastMCP) -> None:
         ok = await app.store.ack_alert(alert_id)
         return {"acknowledged": ok, "alert_id": alert_id}
 
-    @mcp.tool(description="Recent symbol → article-count map.")
+    @mcp.tool(
+        description=(
+            "Recent symbol → article-count map, busiest symbols first "
+            "(bounded: limit <= 500, minutes <= 10080). truncated=true means "
+            "more symbols exist beyond the limit."
+        )
+    )
     async def get_news_symbol_map(
-        minutes: int = 60, min_articles: int = 1
+        minutes: int = 60, min_articles: int = 1, limit: int = MAX_SYMBOL_MAP_DEFAULT
     ) -> dict[str, Any]:
+        if limit > MAX_SYMBOL_MAP_HARD:
+            return _limit_exceeded(MAX_SYMBOL_MAP_HARD, limit)
+        # The wildcard firehose can accumulate thousands of distinct symbols
+        # over long windows — this was the one tool violating the
+        # bounded-response contract.
+        clamped = minutes > MAX_SYMBOL_MAP_MINUTES
+        minutes = min(max(1, minutes), MAX_SYMBOL_MAP_MINUTES)
+        limit = max(1, limit)
         app = get_app_state()
-        m = await app.store.symbol_map(minutes=minutes, min_articles=max(1, min_articles))
-        return {"window_minutes": minutes, "symbol_counts": m}
+        m = await app.store.symbol_map(
+            minutes=minutes, min_articles=max(1, min_articles), limit=limit + 1
+        )
+        truncated = len(m) > limit
+        if truncated:
+            m = dict(list(m.items())[:limit])
+        out: dict[str, Any] = {
+            "window_minutes": minutes,
+            "symbol_counts": m,
+            "truncated": truncated,
+        }
+        if clamped:
+            out["clamped_to_minutes"] = minutes
+        return out
 
     # ---- Diagnostics -------------------------------------------------------
 
@@ -532,9 +627,9 @@ def register(mcp: FastMCP) -> None:
     async def run_news_rest_backfill(minutes: int = 30) -> dict[str, Any]:
         app = get_app_state()
         if not app.config.enable_manual_rest_backfill:
-            return {"error": "disabled"}
+            return _err("disabled", "manual REST backfill is off (ENABLE_MANUAL_REST_BACKFILL=false)")
         if minutes <= 0 or minutes > 60 * 24 * 7:
-            return {"error": "invalid_minutes", "min": 1, "max": 60 * 24 * 7}
+            return _err("invalid_minutes", "pass minutes between 1 and 10080", min=1, max=60 * 24 * 7)
         result = await app.rest_backfill.manual(minutes)
         failure = result.pop("failure", None)
         out = {

@@ -14,6 +14,27 @@ from dateutil import parser as dateparser
 from mcp.server.fastmcp import FastMCP
 
 from .app_state import AppState, get_app_state
+from .tool_common import (
+    client_unavailable as _client_unavailable,
+)
+from .tool_common import (
+    cursor_out_of_range as _cursor_out_of_range,
+)
+from .tool_common import (
+    err as _err,
+)
+from .tool_common import (
+    invalid_date as _invalid_date,
+)
+from .tool_common import (
+    limit_exceeded as _limit_exceeded,
+)
+from .tool_common import (
+    stream_disabled as _stream_disabled,
+)
+from .tool_common import (
+    upstream_error as _upstream_error,
+)
 
 MAX_LATEST_SYMBOLS = 50
 # A stream-cached snapshot older than this is flagged stale — a bot must
@@ -45,36 +66,6 @@ _INCLUDE_TO_SLOT = {
 }
 
 
-def _limit_exceeded(max_allowed: int, requested: int) -> dict[str, Any]:
-    return {
-        "error": "limit_exceeded",
-        "max_allowed": max_allowed,
-        "requested": requested,
-    }
-
-
-def _stream_disabled() -> dict[str, Any]:
-    return {"error": "stock_stream_disabled"}
-
-
-def _client_unavailable() -> dict[str, Any]:
-    return {"error": "market_client_unavailable"}
-
-
-def _upstream_error() -> dict[str, Any]:
-    return {"error": "alpaca_request_failed"}
-
-
-def _cursor_out_of_range(cursor: int, latest: int) -> dict[str, Any]:
-    """See tools._cursor_out_of_range — same contract for bar cursors."""
-    return {
-        "error": "cursor_out_of_range",
-        "cursor": cursor,
-        "latest_cursor": latest,
-        "hint": "pass latest_cursor back (or cursor=-1) to resume from the tail",
-    }
-
-
 def _parse_date(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -83,13 +74,6 @@ def _parse_date(value: str | None) -> datetime | None:
     except (ValueError, TypeError):
         return None
     return dt.replace(tzinfo=dt.tzinfo or UTC)
-
-
-def _invalid_date(field: str, value: str) -> dict[str, Any]:
-    """A caller-provided date that failed to parse must be a structured error
-    — silently falling back to a default window would return valid-looking
-    data for the wrong dates."""
-    return {"error": "invalid_date", "field": field, "value": value}
 
 
 def _market_parts(app: AppState) -> tuple[Any, Any] | None:
@@ -216,13 +200,13 @@ def register(mcp: FastMCP) -> None:
             return _stream_disabled()
         _, market_store = parts
         if not symbols:
-            return {"error": "no_symbols"}
+            return _err("no_symbols", "pass at least one ticker symbol")
         if len(symbols) > MAX_LATEST_SYMBOLS:
             return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
         include = include or ["trade", "quote", "bar"]
         invalid = [i for i in include if i not in VALID_INCLUDE]
         if invalid:
-            return {"error": "invalid_include", "invalid": invalid, "valid": list(VALID_INCLUDE)}
+            return _err("invalid_include", f"use any of: {', '.join(VALID_INCLUDE)}", invalid=invalid, valid=list(VALID_INCLUDE))
         out: dict[str, Any] = {}
         missing: list[str] = []
         for sym in symbols:
@@ -302,7 +286,9 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         description=(
             "Recent trades for one symbol from the rolling tick store "
-            "(retention-bounded). Rows ascend by time: [ts_us, price, size, exchange]."
+            "(retention-bounded, default 4h). Rows ascend by time: "
+            "[ts_us, price, size, exchange]; ts_us = epoch MICROSECONDS (UTC). "
+            "With more rows than `limit`, the MOST RECENT rows are returned."
         )
     )
     async def get_trades_window(
@@ -317,13 +303,14 @@ def register(mcp: FastMCP) -> None:
             return _limit_exceeded(MAX_WINDOW_MINUTES, minutes)
         if limit > MAX_WINDOW_ROWS:
             return _limit_exceeded(MAX_WINDOW_ROWS, limit)
+        symbol = symbol.strip().upper()
         rows = await market_store.trades_window(
             symbol,
             since_us=_minutes_ago_us(max(1, minutes)),
             limit=max(1, limit),
         )
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol,
             "count": len(rows),
             "columns": ["ts_us", "price", "size", "exchange"],
             "trades": [[r["ts_us"], r["price"], r["size"], r["exchange"]] for r in rows],
@@ -332,7 +319,9 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         description=(
             "Recent NBBO quotes for one symbol. Rows ascend by time: "
-            "[ts_us, bid_price, bid_size, ask_price, ask_size]."
+            "[ts_us, bid_price, bid_size, ask_price, ask_size]; ts_us = epoch "
+            "MICROSECONDS (UTC). With more rows than `limit`, the MOST RECENT "
+            "rows are returned."
         )
     )
     async def get_quotes_window(
@@ -347,13 +336,14 @@ def register(mcp: FastMCP) -> None:
             return _limit_exceeded(MAX_WINDOW_MINUTES, minutes)
         if limit > MAX_WINDOW_ROWS:
             return _limit_exceeded(MAX_WINDOW_ROWS, limit)
+        symbol = symbol.strip().upper()
         rows = await market_store.quotes_window(
             symbol,
             since_us=_minutes_ago_us(max(1, minutes)),
             limit=max(1, limit),
         )
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol,
             "count": len(rows),
             "columns": ["ts_us", "bid_price", "bid_size", "ask_price", "ask_size"],
             "quotes": [
@@ -368,7 +358,9 @@ def register(mcp: FastMCP) -> None:
         description=(
             "OHLCV bars for one symbol from the local store. timeframe: 1min|1day. "
             "start/end are ISO-8601. Rows ascend by time: "
-            "[ts, open, high, low, close, volume, trade_count, vwap]."
+            "[ts, open, high, low, close, volume, trade_count, vwap]; "
+            "`ts` is the bar start in epoch SECONDS (UTC). With more rows "
+            "than `limit`, the MOST RECENT rows are returned."
         )
     )
     async def get_stock_bars(
@@ -384,7 +376,11 @@ def register(mcp: FastMCP) -> None:
             return _stream_disabled()
         _, market_store = parts
         if timeframe not in VALID_TIMEFRAMES:
-            return {"error": "invalid_timeframe", "valid": list(VALID_TIMEFRAMES)}
+            return _err(
+                "invalid_timeframe",
+                f"use one of: {', '.join(VALID_TIMEFRAMES)}",
+                valid=list(VALID_TIMEFRAMES),
+            )
         if limit > MAX_BARS:
             return _limit_exceeded(MAX_BARS, limit)
         start_ts = _iso_to_epoch_s(start)
@@ -393,6 +389,7 @@ def register(mcp: FastMCP) -> None:
         end_ts = _iso_to_epoch_s(end)
         if end and end_ts is None:
             return _invalid_date("end", end)
+        symbol = symbol.strip().upper()
         rows = await market_store.bars_window(
             symbol,
             timeframe=timeframe,
@@ -401,7 +398,7 @@ def register(mcp: FastMCP) -> None:
             limit=max(1, limit),
         )
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol,
             "timeframe": timeframe,
             "count": len(rows),
             "columns": ["ts", "open", "high", "low", "close", "volume", "trade_count", "vwap"],
@@ -440,7 +437,7 @@ def register(mcp: FastMCP) -> None:
         if symbols and len(symbols) > MAX_LATEST_SYMBOLS:
             return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
         if timeframe is not None and timeframe not in VALID_TIMEFRAMES:
-            return {"error": "invalid_timeframe", "valid": list(VALID_TIMEFRAMES)}
+            return _err("invalid_timeframe", f"use one of: {', '.join(VALID_TIMEFRAMES)}", valid=list(VALID_TIMEFRAMES))
         latest = market_store.latest_bar_cursor
         if cursor == -1:
             return {
@@ -564,7 +561,7 @@ def register(mcp: FastMCP) -> None:
         if app.market_client is None:
             return _client_unavailable()
         if by not in ("volume", "trades"):
-            return {"error": "invalid_by", "valid": ["volume", "trades"]}
+            return _err("invalid_by", "use volume or trades", valid=["volume", "trades"])
         if top > MAX_ACTIVES_TOP:
             return _limit_exceeded(MAX_ACTIVES_TOP, top)
         payload = await app.market_client.most_actives(by=by, top=max(1, top))
@@ -588,7 +585,7 @@ def register(mcp: FastMCP) -> None:
         if app.market_client is None:
             return _client_unavailable()
         if not symbols:
-            return {"error": "no_symbols"}
+            return _err("no_symbols", "pass at least one ticker symbol")
         if len(symbols) > MAX_SNAPSHOT_SYMBOLS:
             return _limit_exceeded(MAX_SNAPSHOT_SYMBOLS, len(symbols))
         payload = await app.market_client.snapshots(symbols)
@@ -648,7 +645,7 @@ def register(mcp: FastMCP) -> None:
         start_dt = start_dt or datetime.now(UTC)
         end_dt = end_dt or (start_dt + timedelta(days=14))
         if end_dt < start_dt:
-            return {"error": "invalid_range", "reason": "end before start"}
+            return _err("invalid_range", "end must not be before start", reason="end before start")
         if (end_dt - start_dt).days > MAX_CALENDAR_DAYS:
             return _limit_exceeded(MAX_CALENDAR_DAYS, (end_dt - start_dt).days)
         days = await app.market_client.calendar(
@@ -694,7 +691,7 @@ def register(mcp: FastMCP) -> None:
         start_dt = start_dt or (now - timedelta(days=7))
         end_dt = end_dt or (now + timedelta(days=30))
         if end_dt < start_dt:
-            return {"error": "invalid_range", "reason": "end before start"}
+            return _err("invalid_range", "end must not be before start", reason="end before start")
         if (end_dt - start_dt).days > CORPORATE_ACTIONS_MAX_RANGE_DAYS:
             return _limit_exceeded(
                 CORPORATE_ACTIONS_MAX_RANGE_DAYS, (end_dt - start_dt).days

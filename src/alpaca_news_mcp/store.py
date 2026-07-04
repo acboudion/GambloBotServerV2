@@ -818,8 +818,20 @@ class Store:
         until: str | None,
         limit: int,
     ) -> list[NewsArticle]:
-        like = f"%{query.lower()}%"
-        clauses = ["(LOWER(headline) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content_text) LIKE ?)"]
+        # Escape LIKE metacharacters so a query containing % or _ (price
+        # moves, tickers) matches literally instead of as wildcards.
+        escaped = (
+            query.lower()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        like = f"%{escaped}%"
+        clauses = [
+            "(LOWER(headline) LIKE ? ESCAPE '\\' "
+            "OR LOWER(summary) LIKE ? ESCAPE '\\' "
+            "OR LOWER(content_text) LIKE ? ESCAPE '\\')"
+        ]
         params: list[Any] = [like, like, like]
 
         if symbols:
@@ -919,6 +931,7 @@ class Store:
         cursor: int,
         limit: int,
         severity: str | None = None,
+        severities: list[str] | None = None,
         categories: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
         """Alerts with seq > cursor in insert order (alerts are insert-only).
@@ -935,6 +948,10 @@ class Store:
         if severity:
             clauses.append("severity = ?")
             params.append(severity)
+        if severities:
+            placeholders = ",".join("?" * len(severities))
+            clauses.append(f"severity IN ({placeholders})")
+            params.extend(severities)
         if categories:
             placeholders = ",".join("?" * len(categories))
             clauses.append(f"category IN ({placeholders})")
@@ -1209,7 +1226,7 @@ class Store:
         return out
 
     async def symbol_map(
-        self, *, minutes: int, min_articles: int
+        self, *, minutes: int, min_articles: int, limit: int = 500
     ) -> dict[str, int]:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
         cur = await self.rconn.execute(
@@ -1220,8 +1237,9 @@ class Store:
             GROUP BY symbol
             HAVING c >= ?
             ORDER BY c DESC, symbol ASC
+            LIMIT ?
             """,
-            (since, min_articles),
+            (since, min_articles, limit),
         )
         rows = await cur.fetchall()
         await cur.close()

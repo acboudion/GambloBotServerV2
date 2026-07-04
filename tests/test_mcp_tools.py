@@ -355,3 +355,100 @@ async def test_category_and_source_filters_capped(app):
         out = await _call(mcp, tool, **kwargs)
         assert out["error"] == "limit_exceeded", tool
         assert out["max_allowed"] == 50, tool
+
+
+async def _ingest(store, article_id: int, headline: str, symbols=None, **extra):
+    payload = {"T": "n", "id": article_id, "headline": headline,
+               "symbols": symbols or ["AAPL"]}
+    payload.update(extra)
+    return await store.upsert_article(
+        normalize_news_message(payload), source_kind="ws"
+    )
+
+
+@pytest.mark.asyncio
+async def test_alert_filter_validation(app):
+    """A typo'd severity/category must be a structured error, not a silent
+    zero-alert result; min_severity means 'this level and above'."""
+    mcp = build_mcp()
+    out = await _call(mcp, "get_alerts_since", severity="hgih")
+    assert out["error"] == "invalid_severity"
+    out = await _call(mcp, "get_news_alerts", categories=["mna_keyw0rd"])
+    assert out["error"] == "invalid_categories"
+    out = await _call(mcp, "get_alerts_since", severity="high", min_severity="high")
+    assert out["error"] == "conflicting_filters"
+
+    from alpaca_news_mcp.models import Alert
+    for sev, aid in (("critical", "c1"), ("high", "h1"), ("medium", "m1")):
+        await app.store.record_alert(
+            Alert(
+                alert_id=aid, article_id=None,
+                created_at="2026-07-04T00:00:00+00:00", severity=sev,
+                category="mna_keyword", symbols=["AAPL"], headline=None,
+                reason="r", acknowledged=False,
+            ),
+            raw_json="{}",
+        )
+    out = await _call(mcp, "get_alerts_since", min_severity="high")
+    got = {a["alert_id"] for a in out["alerts"]}
+    assert got == {"c1", "h1"}
+
+
+@pytest.mark.asyncio
+async def test_breaking_digest_no_silent_fallback(app):
+    """No breaking matches -> empty digest with breaking_matches=false, not
+    ordinary articles dressed up as breaking."""
+    mcp = build_mcp()
+    await _ingest(app.store, 1, "Quarterly report published on schedule")
+    out = await _call(mcp, "get_breaking_news_digest", minutes=60)
+    assert out["breaking_matches"] is False
+    assert out["articles"] == []
+
+    await _ingest(app.store, 2, "BREAKING: trading halted in XYZ")
+    out = await _call(mcp, "get_breaking_news_digest", minutes=60)
+    assert out["breaking_matches"] is True
+    assert [a["id"] for a in out["articles"]] == [2]
+
+
+@pytest.mark.asyncio
+async def test_symbol_map_is_bounded(app):
+    mcp = build_mcp()
+    for i in range(5):
+        await _ingest(app.store, 100 + i, f"story {i}", symbols=[f"SYM{i}"])
+    out = await _call(mcp, "get_news_symbol_map", minutes=60, limit=3)
+    assert len(out["symbol_counts"]) == 3
+    assert out["truncated"] is True
+    out = await _call(mcp, "get_news_symbol_map", limit=501)
+    assert out["error"] == "limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_search_news_validates_dates_and_includes_end_day(app):
+    mcp = build_mcp()
+    out = await _call(mcp, "search_news", query="anything", since="yesterday-ish")
+    assert out["error"] == "invalid_date" and out["field"] == "since"
+
+    # An article updated during the `until` day must be included when until
+    # is date-only (end-of-day normalization).
+    await _ingest(
+        app.store, 42, "Midday scoop headline",
+        created_at="2026-07-02T14:00:00Z", updated_at="2026-07-02T14:00:00Z",
+    )
+    out = await _call(mcp, "search_news", query="midday scoop", until="2026-07-02")
+    assert out["count"] == 1
+
+    # "Z"-suffixed bounds are canonicalized to the stored +00:00 form.
+    out = await _call(
+        mcp, "search_news", query="midday scoop",
+        since="2026-07-02T14:00:00Z", until="2026-07-02T14:00:00Z",
+    )
+    assert out["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_news_limit_zero_means_default(app):
+    mcp = build_mcp()
+    for i in range(60):
+        await _ingest(app.store, 200 + i, f"headline {i}")
+    out = await _call(mcp, "get_recent_news", minutes=60, limit=0)
+    assert out["count"] == 50  # MAX_ARTICLES_DEFAULT, not 1

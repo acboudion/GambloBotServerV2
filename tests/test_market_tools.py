@@ -366,11 +366,12 @@ async def test_invalid_dates_return_structured_errors(app_with_client):
     silent fallback to the default window (valid-looking data, wrong dates)."""
     mcp = build_mcp()
     cal = await _call(mcp, "get_market_calendar", start="2026-13-01")
-    assert cal == {"error": "invalid_date", "field": "start", "value": "2026-13-01"}
+    assert (cal["error"], cal["field"], cal["value"]) == ("invalid_date", "start", "2026-13-01")
+    assert "hint" in cal
     ca = await _call(mcp, "get_corporate_actions", end="not-a-date")
-    assert ca == {"error": "invalid_date", "field": "end", "value": "not-a-date"}
+    assert (ca["error"], ca["field"], ca["value"]) == ("invalid_date", "end", "not-a-date")
     bars = await _call(mcp, "get_stock_bars", symbol="AAPL", start="garbage")
-    assert bars == {"error": "invalid_date", "field": "start", "value": "garbage"}
+    assert (bars["error"], bars["field"], bars["value"]) == ("invalid_date", "start", "garbage")
 
 
 @pytest.mark.asyncio
