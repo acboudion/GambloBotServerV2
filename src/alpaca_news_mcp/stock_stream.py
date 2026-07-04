@@ -607,7 +607,7 @@ class StockStreamWorker(BaseStreamWorker):
 
     def _rows_from_batch(
         self, batch: list[tuple[str, dict[str, Any]]]
-    ) -> dict[str, list[Any]]:
+    ) -> dict[str, Any]:
         trades: list[tuple[Any, ...]] = []
         quotes: list[tuple[Any, ...]] = []
         bars: list[tuple[Any, ...]] = []
