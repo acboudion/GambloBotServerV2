@@ -7,8 +7,9 @@ snapshot cache; windows/bars come from the market SQLite database.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dateutil import parser as dateparser
 from mcp.server.fastmcp import FastMCP
@@ -64,6 +65,11 @@ BAR_TIMEFRAMES = VALID_TIMEFRAMES + tuple(AGGREGATE_TIMEFRAMES)
 MAX_CONTEXT_SYMBOLS = 20
 MAX_TAPE_BUCKETS = 360
 MAX_PULSE_TOP = 50
+
+try:
+    _EASTERN: ZoneInfo | None = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - tzdata missing
+    _EASTERN = None
 
 # Snapshot-cache slot names per include key.
 _INCLUDE_TO_SLOT = {
@@ -159,6 +165,40 @@ async def _retained_halted_symbols(
         for st in statuses:  # newest first per chunk
             latest.setdefault(st["symbol"], st.get("status_code") or "")
     return {s for s, code in latest.items() if code == "H"}
+
+
+def _context_session(now: datetime) -> tuple[int, date]:
+    """Minute-bar window start + current exchange date for symbol context.
+
+    The window opens at the current session's premarket start (04:00 ET;
+    the previous day's when called overnight), with an 8-hour floor near
+    the boundary. Nothing trades 20:00-04:00 ET, so the floor never mixes
+    another session's bars in. A fixed 8-hour slice alone would drop the
+    morning's regular-session bars late in after-hours and mislabel
+    day_high / day_low / volume_today / session_vwap as day values.
+    """
+    now_ts = int(now.timestamp())
+    if _EASTERN is None:  # pragma: no cover - tzdata missing
+        return now_ts - 8 * 3600, now.date()
+    et = now.astimezone(_EASTERN)
+    session_open = et.replace(hour=4, minute=0, second=0, microsecond=0)
+    if et < session_open:
+        session_open -= timedelta(days=1)
+    return min(int(session_open.timestamp()), now_ts - 8 * 3600), et.date()
+
+
+def _is_current_trading_day(ts: int, trading_date: date) -> bool:
+    """True when a daily bar belongs to the current exchange date.
+
+    UTC midnight is the wrong boundary: during late after-hours
+    (00:00-04:00 UTC) today's daily bar would land before it and be
+    classified as a prior day, poisoning prev_close / gap / relative-volume
+    baselines with the current day's own values.
+    """
+    dt = datetime.fromtimestamp(ts, tz=UTC)
+    if _EASTERN is not None:
+        dt = dt.astimezone(_EASTERN)
+    return dt.date() >= trading_date
 
 
 async def _rest_bars_fallback(
@@ -725,14 +765,13 @@ def register(mcp: FastMCP) -> None:
         if len(symbols) > MAX_CONTEXT_SYMBOLS:
             return _limit_exceeded(MAX_CONTEXT_SYMBOLS, len(symbols))
         now = datetime.now(UTC)
-        now_ts = int(now.timestamp())
-        today_midnight = now_ts - (now_ts % 86_400)
+        bars_start, trading_date = _context_session(now)
         cleaned = [s.strip().upper() for s in symbols]
         db_halted = await _retained_halted_symbols(app, market_store, cleaned)
         out: dict[str, Any] = {}
         for sym in cleaned:
             minute_bars = await market_store.bars_window(
-                sym, timeframe="1min", start_ts=now_ts - 8 * 3600, limit=MAX_BARS
+                sym, timeframe="1min", start_ts=bars_start, limit=MAX_BARS
             )
             daily_bars = await market_store.bars_window(
                 sym, timeframe="1day", limit=15
@@ -754,7 +793,7 @@ def register(mcp: FastMCP) -> None:
             prev_close = None
             prior_volumes: list[float] = []
             if daily_bars:
-                if daily_bars[-1]["ts"] >= today_midnight:
+                if _is_current_trading_day(daily_bars[-1]["ts"], trading_date):
                     prior = daily_bars[:-1]
                 else:
                     prior = daily_bars

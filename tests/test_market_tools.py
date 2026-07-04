@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -482,6 +482,39 @@ async def test_symbol_context_halted_from_retained_status_rows(app):
     mcp = build_mcp()
     out = await _call(mcp, "get_symbol_context", symbols=["AAPL"])
     assert out["symbols"]["AAPL"]["halted"] is True
+
+
+def test_context_session_window_and_daily_classification():
+    """Symbol-context session boundaries are exchange-time, not UTC or a
+    rolling slice: late after-hours must still cover the morning session,
+    and today's daily bar must not become prev_close after 00:00 UTC."""
+    from alpaca_news_mcp.market_tools import (
+        _context_session,
+        _is_current_trading_day,
+    )
+
+    # 18:00 ET (22:00 UTC, July = EDT): the window must reach the 04:00 ET
+    # session open, not just 8 hours back to 10:00 ET.
+    start, trading_date = _context_session(datetime(2026, 7, 8, 22, 0, tzinfo=UTC))
+    assert start == int(datetime(2026, 7, 8, 8, 0, tzinfo=UTC).timestamp())
+    assert trading_date == date(2026, 7, 8)
+
+    # 05:00 ET premarket: the 8h floor keeps the window from collapsing to
+    # the hour since session open.
+    early = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+    start, _ = _context_session(early)
+    assert start == int(early.timestamp()) - 8 * 3600
+
+    # 21:00 ET after-hours = 01:00 UTC on the NEXT UTC day: the trading date
+    # is still July 8, today's daily bar (stamped 04:00 UTC) is the CURRENT
+    # day — not a prior close — and the window still spans the 09:30 open.
+    start, trading_date = _context_session(datetime(2026, 7, 9, 1, 0, tzinfo=UTC))
+    assert trading_date == date(2026, 7, 8)
+    today_daily = int(datetime(2026, 7, 8, 4, 0, tzinfo=UTC).timestamp())
+    assert _is_current_trading_day(today_daily, trading_date) is True
+    prior_daily = int(datetime(2026, 7, 7, 4, 0, tzinfo=UTC).timestamp())
+    assert _is_current_trading_day(prior_daily, trading_date) is False
+    assert start <= int(datetime(2026, 7, 8, 13, 30, tzinfo=UTC).timestamp())
 
 
 @pytest.mark.asyncio
