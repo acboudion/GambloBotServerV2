@@ -99,11 +99,21 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
     )
     set_app_state(app_state)
 
+    backfill_task: asyncio.Task[None] | None = None
     if config.enable_rest_backfill:
-        try:
-            await rest_backfill.backfill_startup()
-        except Exception as e:
-            log.warning("startup backfill failed (continuing): %s", e)
+        # Background task: a long backfill window must not delay stream
+        # startup or keep /healthz returning 503 (docker healthchecks would
+        # kill the container). Article upserts dedup, so running it
+        # concurrently with the live stream is safe.
+        async def _startup_backfill() -> None:
+            try:
+                await rest_backfill.backfill_startup()
+            except Exception as e:
+                log.warning("startup backfill failed (continuing): %s", e)
+
+        backfill_task = asyncio.create_task(
+            _startup_backfill(), name="startup-backfill"
+        )
 
     await stream.start()
     if stock_stream is not None:
@@ -121,7 +131,7 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         yield app_state
     finally:
         log.info("alpaca-news-mcp shutting down")
-        for task in (pruner_task, market_pruner_task):
+        for task in (backfill_task, pruner_task, market_pruner_task):
             if task is None:
                 continue
             task.cancel()

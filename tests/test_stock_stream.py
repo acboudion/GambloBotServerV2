@@ -760,3 +760,34 @@ async def test_stock_recovery_salvages_events_and_counts_tick_loss(wired):
         assert state.snapshot_health("stocks").articles_dropped == 2
     finally:
         StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_quote_sampling_thins_across_batches(wired):
+    """STOCK_QUOTE_SAMPLE_MS must dedup per bucket across drains, not just
+    within one batch."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, stock_quote_sample_ms=1000)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    try:
+        base_us = _to_epoch_us("2026-04-28T15:30:00Z")
+        assert base_us is not None
+
+        def q(offset_ms):
+            item = _quote("AAPL")
+            item["t"] = datetime.fromtimestamp(
+                (base_us + offset_ms * 1000) / 1_000_000, tz=UTC
+            ).isoformat()
+            return item
+
+        # Two separate batches inside the SAME 1s bucket.
+        await worker.persist_batch([("q", q(100))])
+        await worker.persist_batch([("q", q(200))])
+        # A third batch in the NEXT bucket.
+        await worker.persist_batch([("q", q(1200))])
+        rows = await market_store.quotes_window(
+            "AAPL", since_us=base_us - 1_000_000, limit=100
+        )
+        assert len(rows) == 2  # one per bucket, not one per batch
+    finally:
+        StockStreamWorker.reset_singleton()

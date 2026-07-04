@@ -88,6 +88,7 @@ class BaseStreamWorker:
         self._last_stale_alert: float | None = None
         self._sessions_authed = 0
         self._gap_fill_task: asyncio.Task[None] | None = None
+        self._last_queue_warning: float = 0.0
         # Live socket while connected+authenticated; lets subclasses send
         # subscription deltas at runtime.
         self._ws: Any | None = None
@@ -524,7 +525,12 @@ class BaseStreamWorker:
 
             depth = self._queue.qsize()
             if depth >= self.queue_warning_depth():
-                log.warning("%s queue depth high: %d", self.stream_name, depth)
+                # Rate-limited: logging once per received frame while the
+                # queue stays deep amplifies the overload it reports.
+                now = asyncio.get_event_loop().time()
+                if now - self._last_queue_warning >= 30.0:
+                    self._last_queue_warning = now
+                    log.warning("%s queue depth high: %d", self.stream_name, depth)
 
     def _touch_last_message(self) -> None:
         self._state.update_health(

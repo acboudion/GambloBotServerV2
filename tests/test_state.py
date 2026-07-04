@@ -68,3 +68,20 @@ def test_record_article_tracks_counts_and_last_seen():
     assert s.article_count == 2
     assert s.last_seen_updated_at == "2026-04-28T21:00:00+00:00"
     assert s.snapshot_health().article_count == 2
+
+
+def test_hot_path_health_fields_round_trip(state):
+    """last_message_at / last_article_at / articles_dropped bypass the
+    pydantic round trip on write but still appear in snapshots."""
+    state.update_health("stocks", last_message_at="2026-07-04T00:00:00+00:00")
+    state.update_health("stocks", last_article_at="2026-07-04T00:00:01+00:00")
+    n = state.record_article_drop("stocks")
+    assert n == 1
+    snap = state.snapshot_health("stocks")
+    assert snap.last_message_at == "2026-07-04T00:00:00+00:00"
+    assert snap.last_article_at == "2026-07-04T00:00:01+00:00"
+    assert snap.articles_dropped == 1
+    # Mixed updates still work.
+    state.update_health("stocks", connected=True, last_message_at="x")
+    snap = state.snapshot_health("stocks")
+    assert snap.connected is True and snap.last_message_at == "x"

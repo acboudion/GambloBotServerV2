@@ -118,6 +118,10 @@ class StockStreamWorker(BaseStreamWorker):
         )
         self._acknowledged: dict[str, list[str]] | None = None
         self._watchlist_lock = asyncio.Lock()
+        # Per-symbol last-persisted quote-sample bucket. Without cross-batch
+        # state the STOCK_QUOTE_SAMPLE_MS knob only thinned within a single
+        # drained batch, under-delivering its documented storage savings.
+        self._last_quote_bucket: dict[str, int] = {}
 
     @staticmethod
     def _cap_watchlist(symbols: set[str], *, source: str) -> set[str]:
@@ -302,6 +306,9 @@ class StockStreamWorker(BaseStreamWorker):
         return max(1, int(self._config.stock_queue_maxsize * 0.75))
 
     async def on_authenticated(self, ws: Any) -> None:
+        # Fresh session: quote-sample bucket state must not suppress the
+        # first quote after a reconnect.
+        self._last_quote_bucket.clear()
         # Hold the watchlist lock across the replay so a concurrent
         # update_watchlist can't interleave: it either lands before the
         # snapshot read (replay includes it) or after the send (its delta
@@ -577,13 +584,20 @@ class StockStreamWorker(BaseStreamWorker):
 
         # Optional quote thinning for storage (the snapshot cache always keeps
         # the true latest regardless). Keep the last quote per symbol per
-        # sample bucket.
+        # sample bucket, remembering buckets ACROSS batches — small drains
+        # would otherwise store one quote per batch instead of one per bucket.
         sample_ms = self._config.stock_quote_sample_ms
         if sample_ms > 0 and quotes:
             bucketed: dict[tuple[str, int], tuple[Any, ...]] = {}
             for q in quotes:
                 bucketed[(q[0], q[1] // (sample_ms * 1000))] = q
-            quotes = sorted(bucketed.values(), key=lambda q: (q[0], q[1]))
+            kept: list[tuple[Any, ...]] = []
+            for (sym, bucket), q in sorted(bucketed.items()):
+                if self._last_quote_bucket.get(sym) == bucket:
+                    continue
+                self._last_quote_bucket[sym] = bucket
+                kept.append(q)
+            quotes = kept
 
         return {
             "trades": trades,
