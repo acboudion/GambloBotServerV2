@@ -441,12 +441,25 @@ class MarketStore:
         self, symbols: list[str], *, since_us: int
     ) -> dict[str, dict[str, Any]]:
         """One aggregate row per symbol over the window: first/last price,
-        change, volume, trade count, average spread."""
+        change, volume, trade count, average spread.
+
+        Every requested symbol gets a row — a name with no trades in the
+        window (halted, illiquid) must show zero activity, not silently
+        vanish from the watchlist heartbeat."""
         if not symbols:
             return {}
         upper = sorted({s.strip().upper() for s in symbols if s.strip()})
         placeholders = ",".join("?" * len(upper))
-        out: dict[str, dict[str, Any]] = {}
+        out: dict[str, dict[str, Any]] = {
+            sym: {
+                "symbol": sym,
+                "trades": 0,
+                "volume": 0,
+                "low": None,
+                "high": None,
+            }
+            for sym in upper
+        }
         cur = await self.rconn.execute(
             f"""
             SELECT symbol, COUNT(*) AS trades, SUM(size) AS volume,
@@ -458,31 +471,36 @@ class MarketStore:
         )
         rows = await cur.fetchall()
         await cur.close()
+        any_trades = False
         for r in rows:
-            out[r["symbol"]] = dict(r)
-        if not out:
-            return out
-        cur = await self.rconn.execute(
-            f"""
-            SELECT symbol, price, kind FROM (
-              SELECT symbol, price, 'first' AS kind,
-                     ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us ASC) AS rn
-              FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
-            ) WHERE rn = 1
-            UNION ALL
-            SELECT symbol, price, kind FROM (
-              SELECT symbol, price, 'last' AS kind,
-                     ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us DESC) AS rn
-              FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
-            ) WHERE rn = 1
-            """,
-            (since_us, *upper, since_us, *upper),
-        )
-        rows = await cur.fetchall()
-        await cur.close()
-        for r in rows:
-            entry = out.setdefault(r["symbol"], {})
-            entry["first_price" if r["kind"] == "first" else "last_price"] = r["price"]
+            out[r["symbol"]].update(dict(r))
+            any_trades = True
+        if any_trades:
+            cur = await self.rconn.execute(
+                f"""
+                SELECT symbol, price, kind FROM (
+                  SELECT symbol, price, 'first' AS kind,
+                         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us ASC) AS rn
+                  FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
+                ) WHERE rn = 1
+                UNION ALL
+                SELECT symbol, price, kind FROM (
+                  SELECT symbol, price, 'last' AS kind,
+                         ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us DESC) AS rn
+                  FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
+                ) WHERE rn = 1
+                """,
+                (since_us, *upper, since_us, *upper),
+            )
+            rows = await cur.fetchall()
+            await cur.close()
+            for r in rows:
+                entry = out.setdefault(r["symbol"], {})
+                entry["first_price" if r["kind"] == "first" else "last_price"] = (
+                    r["price"]
+                )
+        # Quotes run regardless of trades: halted/illiquid names can still
+        # quote, and their spread is exactly the signal worth surfacing.
         cur = await self.rconn.execute(
             f"""
             SELECT symbol,

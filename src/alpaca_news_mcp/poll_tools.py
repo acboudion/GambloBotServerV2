@@ -153,8 +153,8 @@ async def _bars_section(
 def _snapshot_section(app: AppState, symbols: list[str] | None) -> dict[str, Any]:
     if app.market_store is None or app.stock_stream is None:
         return stream_disabled()
-    wanted = [s.strip().upper() for s in (symbols or app.stock_stream.watchlist())]
-    wanted = wanted[:MAX_SNAPSHOT_SYMBOLS]
+    requested = [s.strip().upper() for s in (symbols or app.stock_stream.watchlist())]
+    wanted = requested[:MAX_SNAPSHOT_SYMBOLS]
     now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
     out: dict[str, Any] = {}
     for sym in wanted:
@@ -174,7 +174,19 @@ def _snapshot_section(app: AppState, symbols: list[str] | None) -> dict[str, Any
         if ages:
             entry["age_seconds"] = round(max(0.0, (now_us - max(ages)) / 1_000_000), 1)
         out[sym] = entry
-    return {"symbols": out, "count": len(out)}
+    section: dict[str, Any] = {"symbols": out, "count": len(out)}
+    if len(requested) > len(wanted):
+        # Watchlists can exceed the snapshot cap (MAX_WATCHLIST_SYMBOLS is
+        # configurable up to 500) — silent truncation would let a bot skip
+        # staleness checks for the omitted names.
+        section["truncated"] = True
+        section["omitted"] = len(requested) - len(wanted)
+        section["hint"] = (
+            "snapshot covers the first "
+            f"{MAX_SNAPSHOT_SYMBOLS} symbols; pass explicit `symbols` "
+            "batches to cover the rest"
+        )
+    return section
 
 
 def market_phase(clock: dict[str, Any] | None, now: datetime) -> str:

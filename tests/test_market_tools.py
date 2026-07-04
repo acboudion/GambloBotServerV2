@@ -493,3 +493,55 @@ async def test_get_watchlist_pulse_rows(app):
     assert row["last"] == 101.0
     assert row["chg_pct"] == pytest.approx(1.0)
     assert row["volume"] == 300
+
+
+@pytest.mark.asyncio
+async def test_watchlist_pulse_includes_inactive_symbols(app):
+    """A watchlist symbol with no trades in the window (halted/illiquid)
+    must appear with zero activity and its halted flag — not vanish."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(trades=[
+        ("AAPL", now_us - 1_000_000, 100.0, 100, "V", "@", "C", 1),
+    ])
+    # TSLA: no trades, but a cached halt status.
+    app.market_store.snapshots.update(
+        "TSLA", "status", {"sc": "H", "ts_us": now_us}
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    rows = {r[0]: dict(zip(out["columns"], r, strict=True)) for r in out["rows"]}
+    assert set(rows) == {"AAPL", "TSLA"}
+    assert rows["AAPL"]["trades"] == 1
+    assert rows["TSLA"]["trades"] == 0
+    assert rows["TSLA"]["last"] is None
+    assert rows["TSLA"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_market_pulse_checks_halts_beyond_first_50_candidates(app, monkeypatch):
+    """Every discovery candidate gets a real halt check, even past the
+    50-symbol-per-query slice."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    # Halt the symbol that lands LAST in insertion order (past slot 50).
+    await app.market_store.persist_stream_batch(
+        statuses=[("ZZT60", now_us, "H", "Trading Halt", "T1", "News", "C")]
+    )
+
+    class _Client:
+        async def movers(self, top=10):
+            gainers = [{"symbol": f"GG{i:02d}", "price": 10.0,
+                        "percent_change": 5.0, "volume": 1000} for i in range(30)]
+            losers = [{"symbol": f"LL{i:02d}", "price": 10.0,
+                       "percent_change": -5.0, "volume": 1000} for i in range(30)]
+            return {"gainers": gainers, "losers": losers}
+
+        async def most_actives(self, by="volume", top=10):
+            actives = [{"symbol": f"ZZT{i:02d}", "volume": 9000} for i in range(61)]
+            return {"most_actives": actives}
+
+    monkeypatch.setattr(app, "market_client", _Client())
+    mcp = build_mcp()
+    out = await _call(mcp, "get_market_pulse", top=50)
+    assert out["count"] > 50
+    by_symbol = {c["symbol"]: c for c in out["candidates"]}
+    assert by_symbol["ZZT60"]["halted"] is True

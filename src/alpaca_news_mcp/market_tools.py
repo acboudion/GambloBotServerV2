@@ -885,12 +885,19 @@ def register(mcp: FastMCP) -> None:
         watch = set(app.stock_stream.watchlist()) if app.stock_stream else set()
         halted: set[str] = set()
         if app.market_store is not None and candidates:
-            statuses = await app.market_store.recent_statuses(
-                minutes=240, symbols=list(candidates)[:50], limit=200
-            )
+            # gainers + losers + most-actives can exceed one query's symbol
+            # cap; chunk so EVERY candidate gets a real halt check — a
+            # discovery tool must never present a halted name as tradable.
             latest_status: dict[str, str] = {}
-            for st in statuses:  # newest first
-                latest_status.setdefault(st["symbol"], st.get("status_code") or "")
+            all_candidates = list(candidates)
+            for i in range(0, len(all_candidates), 50):
+                statuses = await app.market_store.recent_statuses(
+                    minutes=240, symbols=all_candidates[i : i + 50], limit=200
+                )
+                for st in statuses:  # newest first per chunk
+                    latest_status.setdefault(
+                        st["symbol"], st.get("status_code") or ""
+                    )
             halted = {s for s, code in latest_status.items() if code == "H"}
 
         rows = []

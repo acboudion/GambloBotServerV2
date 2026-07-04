@@ -179,3 +179,54 @@ async def test_trading_loop_prompt_registered(app):
     mcp = build_mcp()
     prompts = mcp._prompt_manager._prompts
     assert "trading-loop" in prompts
+
+
+@pytest.mark.asyncio
+async def test_snapshot_section_flags_truncation(tmp_path, monkeypatch):
+    """Watchlists beyond the 50-symbol snapshot cap must surface truncation
+    metadata instead of silently omitting symbols."""
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("STORAGE_PATH", str(tmp_path / "n.sqlite"))
+    monkeypatch.setenv("MARKET_STORAGE_PATH", str(tmp_path / "m.sqlite"))
+    monkeypatch.setenv("ENABLE_REST_BACKFILL", "false")
+    monkeypatch.setenv("MAX_WATCHLIST_SYMBOLS", "120")
+    monkeypatch.setenv(
+        "STOCK_WATCHLIST_SYMBOLS", ",".join(f"S{i:03d}" for i in range(60))
+    )
+    cfg = Config.from_env()
+    store = await Store.open(cfg.storage_path)
+    await store.init_schema()
+    market_store = await MarketStore.open(cfg.market_storage_path)
+    await market_store.init_schema()
+    state = State()
+    alerts = AlertEngine()
+    rest = RestBackfillWorker(cfg, store, state, alerts)
+    NewsStreamWorker.reset_singleton()
+    StockStreamWorker.reset_singleton()
+    stream = NewsStreamWorker(cfg, store, state, alerts)
+    stock_stream = StockStreamWorker(cfg, store, market_store, state, alerts)
+    app_state = AppState(
+        config=cfg, store=store, state=state, alerts=alerts,
+        stream=stream, rest_backfill=rest,
+        market_store=market_store, stock_stream=stock_stream,
+    )
+    set_app_state(app_state)
+    try:
+        mcp = build_mcp()
+        out = await _call(mcp, "poll_market", include=["snapshot"])
+        snap = out["snapshot"]
+        assert snap["truncated"] is True
+        assert snap["omitted"] == 10  # 60-symbol watchlist, 50-symbol cap
+        assert "hint" in snap
+
+        # Explicit small symbol set: no truncation keys.
+        out = await _call(mcp, "poll_market", include=["snapshot"], symbols=["S001"])
+        assert "truncated" not in out["snapshot"]
+    finally:
+        clear_app_state()
+        await rest.close()
+        await store.close()
+        await market_store.close()
+        NewsStreamWorker.reset_singleton()
+        StockStreamWorker.reset_singleton()
