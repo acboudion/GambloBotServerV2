@@ -412,17 +412,24 @@ class AlertEngine:
         reason_code: str | None,
         reason_msg: str | None,
         important: bool,
+        background: bool = False,
     ) -> Alert | None:
         """Trading-status change → trading_halt / trading_resume alert.
-        Returns None for uninteresting statuses or recent duplicates."""
+        Returns None for uninteresting statuses or recent duplicates.
+        background=True (market-wide statuses:* coverage for symbols the bot
+        does not hold or watch) demotes severity so discovery signal never
+        drowns the watchlist feed."""
         code = (status_code or "").upper()
         msg = (status_msg or "").lower()
         if code == "H" or "halt" in msg or "pause" in msg:
             category: AlertCategory = "trading_halt"
-            severity: Severity = "critical" if important else "high"
+            if important:
+                severity: Severity = "critical"
+            else:
+                severity = "low" if background else "high"
         elif code in ("T", "R") or "resum" in msg or "trading" in msg:
             category = "trading_resume"
-            severity = "medium"
+            severity = "low" if background and not important else "medium"
         else:
             return None
         if self._market_alert_deduped(symbol, category):
@@ -605,6 +612,63 @@ class AlertEngine:
         if received is None or not candidates:
             return article.latency_ms
         return int((received - max(candidates)).total_seconds() * 1000)
+
+    def price_move_alert(
+        self, *, symbol: str, pct: float, window_minutes: int, important: bool
+    ) -> Alert | None:
+        if self._market_alert_deduped(symbol, "price_move"):
+            return None
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="high" if important else "medium",
+            category="price_move",
+            symbols=[symbol.upper()],
+            headline=None,
+            reason=(
+                f"{symbol.upper()} moved {pct:+.2f}% in ~{window_minutes} minutes"
+            ),
+            acknowledged=False,
+            direction="bullish" if pct > 0 else "bearish",
+        )
+
+    def volume_spike_alert(
+        self, *, symbol: str, ratio: float, important: bool
+    ) -> Alert | None:
+        if self._market_alert_deduped(symbol, "volume_spike"):
+            return None
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="high" if important else "medium",
+            category="volume_spike",
+            symbols=[symbol.upper()],
+            headline=None,
+            reason=(
+                f"{symbol.upper()} minute volume {ratio:.1f}x its rolling average"
+            ),
+            acknowledged=False,
+        )
+
+    def day_range_break_alert(
+        self, *, symbol: str, side: str, level: float, important: bool
+    ) -> Alert | None:
+        if self._market_alert_deduped(symbol, "day_range_break"):
+            return None
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="high" if important else "medium",
+            category="day_range_break",
+            symbols=[symbol.upper()],
+            headline=None,
+            reason=f"{symbol.upper()} broke its day {side} ({level})",
+            acknowledged=False,
+            direction="bullish" if side == "high" else "bearish",
+        )
 
     def watched_story_alert(self, article: NewsArticle) -> Alert:
         """An update landed on a story the bot explicitly watches.

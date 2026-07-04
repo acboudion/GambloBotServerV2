@@ -46,9 +46,17 @@ DATA_TYPES = frozenset(TYPE_TO_CHANNEL)
 RAW_TYPES = frozenset({"c", "x"})  # corrections, cancelErrors
 
 WATCHLIST_STATUS_KEY = "stock_watchlist"
+# Default local cap; runtime value comes from Config.max_watchlist_symbols
+# (Alpaca's paid plan has no stream symbol limit — this bounds local DB
+# volume and snapshot memory).
 MAX_WATCHLIST_SYMBOLS = 100
 
 BAR_GAP_FILL_FALLBACK_MINUTES = 60
+# Rolling per-symbol bar history kept for derived alerts (price move /
+# volume spike / range break) — memory only, tiny.
+DERIVED_STATE_MAX_BARS = 60
+VOLUME_BASELINE_MIN_SAMPLES = 10
+RANGE_BREAK_MIN_BARS = 30
 
 
 def _to_epoch_us(value: Any) -> int | None:
@@ -113,31 +121,37 @@ class StockStreamWorker(BaseStreamWorker):
         self._market_store = market_store
         self._market_client = market_client
         self._channels: list[str] = list(config.stock_channels)
+        self._max_watchlist = config.max_watchlist_symbols
         self._watchlist: set[str] = self._cap_watchlist(
             {s.upper() for s in config.stock_watchlist_symbols}, source="configured"
         )
         self._acknowledged: dict[str, list[str]] | None = None
         self._watchlist_lock = asyncio.Lock()
+        # True while this session's statuses:["*"] subscription is believed
+        # accepted — market-wide halt coverage beyond the watchlist.
+        self._statuses_wildcard_ok = False
+        # Per-symbol rolling bar state for derived alerts.
+        self._bar_state: dict[str, dict[str, Any]] = {}
+        self._add_backfill_tasks: set[asyncio.Task[None]] = set()
         # Per-symbol last-persisted quote-sample bucket. Without cross-batch
         # state the STOCK_QUOTE_SAMPLE_MS knob only thinned within a single
         # drained batch, under-delivering its documented storage savings.
         self._last_quote_bucket: dict[str, int] = {}
 
-    @staticmethod
-    def _cap_watchlist(symbols: set[str], *, source: str) -> set[str]:
+    def _cap_watchlist(self, symbols: set[str], *, source: str) -> set[str]:
         """update_watchlist rejects oversized requests outright; the startup
         paths (env config / restored state) clamp instead — an oversized
-        subscribe would hit Alpaca's symbol limit and leave the stream with no
-        valid acknowledged subscription at all. Deterministic: keeps the first
-        MAX_WATCHLIST_SYMBOLS in sorted order."""
-        if len(symbols) <= MAX_WATCHLIST_SYMBOLS:
+        subscribe would hit plan limits and leave the stream with no valid
+        acknowledged subscription at all. Deterministic: keeps the first
+        max_watchlist_symbols in sorted order."""
+        if len(symbols) <= self._max_watchlist:
             return symbols
-        kept = set(sorted(symbols)[:MAX_WATCHLIST_SYMBOLS])
+        kept = set(sorted(symbols)[: self._max_watchlist])
         log.warning(
             "%s watchlist has %d symbols; capped to %d (dropped: %s)",
             source,
             len(symbols),
-            MAX_WATCHLIST_SYMBOLS,
+            self._max_watchlist,
             ",".join(sorted(symbols - kept)),
         )
         return kept
@@ -183,11 +197,12 @@ class StockStreamWorker(BaseStreamWorker):
                 new = current - cleaned
             else:
                 return {"error": "invalid_mode", "mode": mode}
-            if len(new) > MAX_WATCHLIST_SYMBOLS:
+            if len(new) > self._max_watchlist:
                 return {
                     "error": "watchlist_too_large",
-                    "max_allowed": MAX_WATCHLIST_SYMBOLS,
+                    "max_allowed": self._max_watchlist,
                     "requested": len(new),
+                    "hint": "remove symbols first, or raise MAX_WATCHLIST_SYMBOLS",
                 }
             added = new - current
             removed = current - new
@@ -210,31 +225,110 @@ class StockStreamWorker(BaseStreamWorker):
                 )
             ws = self._ws
             sent_delta = False
+            # While the wildcard statuses subscription is live, per-symbol
+            # deltas must not touch the statuses channel — unsubscribing a
+            # symbol's statuses could subtract from the market-wide coverage.
+            delta_channels = [
+                c
+                for c in self._channels
+                if not (c == "statuses" and self._statuses_wildcard_ok)
+            ]
             if ws is not None and (added or removed):
                 try:
                     if removed:
-                        await self._send_subscription(ws, "unsubscribe", sorted(removed))
+                        await self._send_subscription(
+                            ws, "unsubscribe", sorted(removed), channels=delta_channels
+                        )
                     if added:
-                        await self._send_subscription(ws, "subscribe", sorted(added))
+                        await self._send_subscription(
+                            ws, "subscribe", sorted(added), channels=delta_channels
+                        )
                     sent_delta = True
                 except Exception as e:
                     log.warning("watchlist delta send failed (will apply on reconnect): %s", e)
-            return {
-                "watchlist": sorted(new),
-                "channels": self._channels,
-                "added": sorted(added),
-                "removed": sorted(removed),
-                "connected": ws is not None,
-                "delta_sent": sent_delta,
-            }
+        # Outside the lock: bounded REST bar backfill for newly added symbols
+        # so get_stock_bars/get_symbol_context aren't blind until the next
+        # reconnect gap-fill.
+        if added:
+            self._spawn_added_symbol_backfill(sorted(added))
+        return {
+            "watchlist": sorted(new),
+            "channels": self._channels,
+            "added": sorted(added),
+            "removed": sorted(removed),
+            "connected": ws is not None,
+            "delta_sent": sent_delta,
+        }
+
+    def _spawn_added_symbol_backfill(self, symbols: list[str]) -> None:
+        if (
+            self._market_client is None
+            or self._config.watchlist_add_backfill_minutes <= 0
+            or not {"bars", "updatedBars"} & set(self._channels)
+        ):
+            return
+        task = asyncio.create_task(
+            self._backfill_added_symbols(symbols),
+            name=f"watchlist-add-backfill-{','.join(symbols[:3])}",
+        )
+        self._add_backfill_tasks.add(task)
+        task.add_done_callback(self._add_backfill_tasks.discard)
+
+    async def _backfill_added_symbols(self, symbols: list[str]) -> None:
+        assert self._market_client is not None
+        start_ts = (
+            int(datetime.now(UTC).timestamp())
+            - self._config.watchlist_add_backfill_minutes * 60
+        )
+        start_iso = datetime.fromtimestamp(start_ts, tz=UTC).isoformat()
+        try:
+            bars_by_symbol = await self._market_client.bars(
+                symbols, start_iso=start_iso, timeframe="1Min"
+            )
+        except Exception as e:
+            log.warning("watchlist-add bar backfill failed for %s: %s", symbols, e)
+            return
+        rows: list[tuple[Any, ...]] = []
+        for symbol, bars in bars_by_symbol.items():
+            for bar in bars:
+                ts_us = _to_epoch_us(bar.get("t"))
+                if ts_us is None:
+                    continue
+                rows.append(
+                    (
+                        symbol.upper(), "1min", ts_us // 1_000_000,
+                        bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"),
+                        bar.get("v"), bar.get("n"), bar.get("vw"),
+                    )
+                )
+        if rows:
+            await self._market_store.upsert_bars(rows)
+            log.info(
+                "watchlist-add backfill: %d bars for %s", len(rows), ",".join(symbols)
+            )
+
+    async def stop(self) -> None:
+        for task in list(self._add_backfill_tasks):
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._add_backfill_tasks.clear()
+        await super().stop()
 
     async def _send_subscription(
-        self, ws: Any, action: str, symbols: list[str]
+        self,
+        ws: Any,
+        action: str,
+        symbols: list[str],
+        *,
+        channels: list[str] | None = None,
     ) -> None:
         if not symbols:
             return
         message: dict[str, Any] = {"action": action}
-        for channel in self._channels:
+        for channel in channels if channels is not None else self._channels:
             message[channel] = symbols
         await ws.send(self.encode_message(message))
 
@@ -319,14 +413,24 @@ class StockStreamWorker(BaseStreamWorker):
             # symbols the current connection hasn't acknowledged (trust acks,
             # not requests).
             self._acknowledged = None
+            self._statuses_wildcard_ok = False
             # Replay the full desired subscription; the ack arrives via the
             # receive loop (handle_item) so we don't block here.
             await self._send_subscription(ws, "subscribe", sorted(self._watchlist))
+            requested = {c: sorted(self._watchlist) for c in self._channels}
+            # Market-wide halt coverage: statuses are a few tiny events per
+            # day even across the whole market, so subscribe them wildcard.
+            # Sent as a SEPARATE frame — mixing "*" and symbol lists in one
+            # message risks a whole-message rejection.
+            if self._config.stock_status_wildcard and "statuses" in self._channels:
+                await ws.send(
+                    self.encode_message({"action": "subscribe", "statuses": ["*"]})
+                )
+                self._statuses_wildcard_ok = True
+                requested["statuses"] = ["*"]
             self._state.update_health(
                 self.stream_name,
-                requested_subscription={
-                    c: sorted(self._watchlist) for c in self._channels
-                },
+                requested_subscription=requested,
                 acknowledged_subscription=None,
                 subscription_mode="watchlist",
             )
@@ -406,6 +510,24 @@ class StockStreamWorker(BaseStreamWorker):
                 entitlement_error=entitlement,
                 last_error=f"{code} {msg}",
             )
+            # If the wildcard statuses frame was rejected, fall back to
+            # per-symbol statuses so halt coverage for the watchlist survives.
+            if self._statuses_wildcard_ok and "statuses" in self._channels:
+                self._statuses_wildcard_ok = False
+                ws = self._ws
+                if ws is not None and self._watchlist:
+                    try:
+                        await self._send_subscription(
+                            ws,
+                            "subscribe",
+                            sorted(self._watchlist),
+                            channels=["statuses"],
+                        )
+                        log.info(
+                            "statuses wildcard rejected; resubscribed watchlist statuses"
+                        )
+                    except Exception as e:  # pragma: no cover - defensive
+                        log.warning("statuses fallback resubscribe failed: %s", e)
         else:
             self._state.update_health(self.stream_name, last_error=f"{code} {msg}")
 
@@ -472,6 +594,10 @@ class StockStreamWorker(BaseStreamWorker):
         )
         self._update_snapshots(batch)
         await self._emit_market_alerts(rows["status_items"], rows["luld_items"])
+        # Derived price/volume alerts run on bar events only (~1 event per
+        # symbol per minute) — never on the quote hot path.
+        if rows["bar_items"]:
+            await self._emit_derived_alerts(rows["bar_items"])
 
     def _rows_from_batch(
         self, batch: list[tuple[str, dict[str, Any]]]
@@ -484,6 +610,7 @@ class StockStreamWorker(BaseStreamWorker):
         raw: list[tuple[str, str]] = []
         status_items: list[dict[str, Any]] = []
         luld_items: list[dict[str, Any]] = []
+        bar_items: list[dict[str, Any]] = []
 
         for kind, item in batch:
             symbol = str(item.get("S") or "").upper()
@@ -528,6 +655,8 @@ class StockStreamWorker(BaseStreamWorker):
                 )
             elif kind in ("b", "u", "d") and symbol and ts_us is not None:
                 timeframe = "1day" if kind == "d" else "1min"
+                if kind == "b":
+                    bar_items.append(item)
                 bars.append(
                     (
                         symbol,
@@ -608,6 +737,7 @@ class StockStreamWorker(BaseStreamWorker):
             "raw": raw,
             "status_items": status_items,
             "luld_items": luld_items,
+            "bar_items": bar_items,
         }
 
     def _update_snapshots(self, batch: list[tuple[str, dict[str, Any]]]) -> None:
@@ -667,6 +797,9 @@ class StockStreamWorker(BaseStreamWorker):
                 reason_code=item.get("rc"),
                 reason_msg=item.get("rm"),
                 important=important,
+                # Wildcard coverage: statuses for symbols the bot neither
+                # holds nor watches are discovery signal, not urgency.
+                background=self._statuses_wildcard_ok and not important,
             )
             if alert is not None:
                 inserted = await self._store.record_alert(
@@ -686,6 +819,112 @@ class StockStreamWorker(BaseStreamWorker):
                 inserted = await self._store.record_alert(
                     alert, raw_json=orjson.dumps(item, default=str).decode("utf-8")
                 )
+                if inserted:
+                    self._state.record_alert(alert)
+
+    async def _emit_derived_alerts(self, bar_items: list[dict[str, Any]]) -> None:
+        """Deterministic price/volume triggers evaluated on minute bars.
+
+        Converts 'invisible until the bot happens to pull bars' moves into
+        pushed alerts on the feed it already polls. State is per-symbol and
+        in-memory: recent (ts, close) pairs for the move window, recent
+        volumes for the spike baseline, and the running day high/low."""
+        cfg = self._config
+        if (
+            cfg.price_move_alert_pct <= 0
+            and cfg.volume_spike_ratio <= 0
+        ):
+            return
+        interest = self._state.get_interest_symbols()
+        window_s = max(60, cfg.price_move_window_minutes * 60)
+        for item in bar_items:
+            symbol = str(item.get("S") or "").upper()
+            ts_us = _to_epoch_us(item.get("t"))
+            close = item.get("c")
+            if not symbol or ts_us is None or not isinstance(close, (int, float)):
+                continue
+            ts = ts_us // 1_000_000
+            h_val = item.get("h")
+            l_val = item.get("l")
+            v_val = item.get("v")
+            high = float(h_val) if isinstance(h_val, (int, float)) else float(close)
+            low = float(l_val) if isinstance(l_val, (int, float)) else float(close)
+            volume = float(v_val) if isinstance(v_val, (int, float)) else 0.0
+            st = self._bar_state.setdefault(
+                symbol,
+                {"closes": [], "vols": [], "day": None, "hi": None, "lo": None},
+            )
+            if st["day"] != ts // 86_400:
+                st.update(day=ts // 86_400, hi=None, lo=None)
+                st["closes"].clear()
+                st["vols"].clear()
+            pending: list[Any] = []
+            important = symbol in self._watchlist or symbol in interest
+
+            closes = st["closes"]
+            while closes and ts - closes[0][0] > window_s:
+                closes.pop(0)
+            if cfg.price_move_alert_pct > 0 and closes:
+                ref_ts, ref_close = closes[0]
+                # Require most of the window to have elapsed so two adjacent
+                # bars can't fake a "5-minute" move.
+                if ref_close and ts - ref_ts >= window_s * 0.6:
+                    pct = (float(close) - ref_close) / ref_close * 100.0
+                    if abs(pct) >= cfg.price_move_alert_pct:
+                        pending.append(
+                            self._alerts.price_move_alert(
+                                symbol=symbol,
+                                pct=pct,
+                                window_minutes=cfg.price_move_window_minutes,
+                                important=important,
+                            )
+                        )
+
+            vols = st["vols"]
+            if (
+                cfg.volume_spike_ratio > 0
+                and len(vols) >= VOLUME_BASELINE_MIN_SAMPLES
+                and volume
+            ):
+                avg = sum(vols) / len(vols)
+                if avg > 0 and float(volume) >= avg * cfg.volume_spike_ratio:
+                    pending.append(
+                        self._alerts.volume_spike_alert(
+                            symbol=symbol,
+                            ratio=float(volume) / avg,
+                            important=important,
+                        )
+                    )
+
+            if len(closes) >= RANGE_BREAK_MIN_BARS:
+                if st["hi"] is not None and float(close) > st["hi"]:
+                    pending.append(
+                        self._alerts.day_range_break_alert(
+                            symbol=symbol, side="high", level=st["hi"],
+                            important=important,
+                        )
+                    )
+                elif st["lo"] is not None and float(close) < st["lo"]:
+                    pending.append(
+                        self._alerts.day_range_break_alert(
+                            symbol=symbol, side="low", level=st["lo"],
+                            important=important,
+                        )
+                    )
+
+            closes.append((ts, float(close)))
+            vols.append(float(volume or 0))
+            if len(closes) > DERIVED_STATE_MAX_BARS:
+                del closes[0]
+            if len(vols) > DERIVED_STATE_MAX_BARS:
+                del vols[0]
+            st["hi"] = high if st["hi"] is None else max(st["hi"], high)
+            st["lo"] = low if st["lo"] is None else min(st["lo"], low)
+
+            for alert in pending:
+                if alert is None:  # deduped inside the factory
+                    continue
+                inserted = await self._store.record_alert(alert, raw_json="{}")
                 if inserted:
                     self._state.record_alert(alert)
 

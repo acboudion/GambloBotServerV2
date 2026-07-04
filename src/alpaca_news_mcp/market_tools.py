@@ -135,6 +135,60 @@ def _iso_ts_to_us(value: Any) -> int | None:
     return int(dt.timestamp() * 1_000_000)
 
 
+async def _rest_bars_fallback(
+    app: AppState,
+    symbol: str,
+    timeframe: str,
+    start_ts: int | None,
+    end_ts: int | None,
+    limit: int,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """REST bars for symbols/ranges absent from the local store. Returns rows
+    shaped like MarketStore.bars_window, or a structured error dict."""
+    from .market_client import MarketDataError
+
+    assert app.market_client is not None
+    now_ts = int(datetime.now(UTC).timestamp())
+    if start_ts is None:
+        # Default lookback mirrors the local defaults: a session of minute
+        # bars, or a month of dailies.
+        start_ts = now_ts - (390 * 60 if timeframe == "1min" else 30 * 86_400)
+    start_iso = datetime.fromtimestamp(start_ts, tz=UTC).isoformat()
+    end_iso = (
+        datetime.fromtimestamp(end_ts, tz=UTC).isoformat() if end_ts else None
+    )
+    try:
+        by_symbol = await app.market_client.bars(
+            [symbol],
+            start_iso=start_iso,
+            end_iso=end_iso,
+            timeframe="1Min" if timeframe == "1min" else "1Day",
+        )
+    except MarketDataError:
+        return _upstream_error()
+    rows: list[dict[str, Any]] = []
+    for bar in by_symbol.get(symbol, []):
+        ts_us = _iso_ts_to_us(bar.get("t"))
+        if ts_us is None and hasattr(bar.get("t"), "timestamp"):
+            ts_us = int(bar["t"].timestamp() * 1_000_000)
+        if ts_us is None:
+            continue
+        rows.append(
+            {
+                "ts": ts_us // 1_000_000,
+                "open": bar.get("o"),
+                "high": bar.get("h"),
+                "low": bar.get("l"),
+                "close": bar.get("c"),
+                "volume": bar.get("v"),
+                "trade_count": bar.get("n"),
+                "vwap": bar.get("vw"),
+            }
+        )
+    rows.sort(key=lambda r: r["ts"])
+    return rows[-limit:]
+
+
 def register(mcp: FastMCP) -> None:
     # ---- stream health / watchlist ------------------------------------------------
 
@@ -407,6 +461,7 @@ def register(mcp: FastMCP) -> None:
                 end_ts=end_ts,
                 limit=max(1, limit),
             )
+            source = "local"
         else:
             rows = await market_store.bars_window(
                 symbol,
@@ -415,10 +470,24 @@ def register(mcp: FastMCP) -> None:
                 end_ts=end_ts,
                 limit=max(1, limit),
             )
+            source = "local"
+            if not rows and app.market_client is not None:
+                # Newly watched (or never-watched) symbols have no local
+                # history until the stream/gap-fill populates it — fall back
+                # to REST so the first look is never blind. Feed-pinned and
+                # bounded by the same limit.
+                rest = await _rest_bars_fallback(
+                    app, symbol, timeframe, start_ts, end_ts, max(1, limit)
+                )
+                if isinstance(rest, dict):
+                    return rest
+                rows = rest
+                source = "rest"
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "count": len(rows),
+            "source": source,
             "columns": ["ts", "open", "high", "low", "close", "volume", "trade_count", "vwap"],
             "bars": [
                 [r["ts"], r["open"], r["high"], r["low"], r["close"],

@@ -156,6 +156,14 @@ class Config:
     status_retention_days: int
     market_retention_interval_seconds: int
     gap_fill_max_lookback_minutes: int
+    max_watchlist_symbols: int
+    stock_status_wildcard: bool
+    watchlist_add_backfill_minutes: int
+
+    # Derived (server-computed) alerts; 0 disables each trigger.
+    price_move_alert_pct: float
+    price_move_window_minutes: int
+    volume_spike_ratio: float
 
     # REST market context
     alpaca_trading_base_url: str
@@ -261,6 +269,18 @@ class Config:
             gap_fill_max_lookback_minutes=_get_int(
                 "GAP_FILL_MAX_LOOKBACK_MINUTES", 1440
             ),
+            # Alpaca's paid plan has no stream symbol cap — this bound is
+            # local (DB volume / snapshot memory). Hard ceiling 500.
+            max_watchlist_symbols=min(
+                500, max(1, _get_int("MAX_WATCHLIST_SYMBOLS", 100))
+            ),
+            stock_status_wildcard=_get_bool("STOCK_STATUS_WILDCARD", True),
+            watchlist_add_backfill_minutes=_get_int(
+                "WATCHLIST_ADD_BACKFILL_MINUTES", 240
+            ),
+            price_move_alert_pct=_get_float("PRICE_MOVE_ALERT_PCT", 3.0),
+            price_move_window_minutes=_get_int("PRICE_MOVE_WINDOW_MINUTES", 5),
+            volume_spike_ratio=_get_float("VOLUME_SPIKE_RATIO", 5.0),
             alpaca_trading_base_url=_get_str(
                 "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"
             ),
