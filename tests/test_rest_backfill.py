@@ -233,7 +233,7 @@ async def test_backfill_distinguishes_new_updated_duplicate(wired):
         route.mock(return_value=httpx.Response(200, json=page_v2))
         third = await worker.manual(60)
 
-    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "failure": None}
+    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "truncated": False, "failure": None}
     assert second["ingested"] == 1 and second["updated"] == 1 and second["new"] == 0 and second["duplicate"] == 0
     assert third["ingested"] == 1 and third["duplicate"] == 1 and third["new"] == 0 and third["updated"] == 0
 
@@ -402,3 +402,30 @@ async def test_non_json_body_marks_run_incomplete(wired):
         )
         result = await worker.manual(30)
     assert result["failure"] == "non-JSON response body"
+
+
+@pytest.mark.asyncio
+async def test_history_fetch_scopes_symbols_and_caps_items(wired):
+    """fetch_news_history: symbol-scoped params, item budget stops
+    pagination as an intentional truncation (not a failure)."""
+    worker, store, _, _ = wired
+    seen_params = []
+
+    def responder(request):
+        seen_params.append(dict(request.url.params))
+        news = [
+            {"id": 9000 + i, "headline": f"old story {i}", "symbols": ["XBIO"],
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"}
+            for i in range(3)
+        ]
+        return httpx.Response(200, json={"news": news, "next_page_token": "more"})
+
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(side_effect=responder)
+        result = await worker.history(symbols=["xbio"], days=90, max_articles=2)
+
+    assert seen_params[0]["symbols"] == "XBIO"
+    assert result["truncated"] is True
+    assert result["failure"] is None
+    assert result["new"] + result["updated"] + result["duplicate"] == 2
+    assert (await store.get_article(9000)) is not None

@@ -510,3 +510,39 @@ async def test_seq_watermarks_survive_prune_and_restart(tmp_path):
         assert [a["alert_id"] for a in alerts] == ["new-alert"]
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_symbol_pulse_rollup(open_store):
+    from alpaca_news_mcp.models import Alert
+
+    for i, headline in enumerate(
+        ["XCorp beats earnings", "XCorp raises outlook", "YCo misses badly"]
+    ):
+        sym = "XC" if i < 2 else "YC"
+        p = _payload(800 + i, headline=headline)
+        p["symbols"] = [sym]
+        await open_store.upsert_article(normalize_news_message(p), source_kind="ws")
+    await open_store.record_alert(
+        Alert(
+            alert_id="p1", article_id=800, created_at="2026-07-04T00:00:00+00:00",
+            severity="high", category="earnings_keyword", symbols=["XC"],
+            headline="XCorp beats earnings", reason="r", acknowledged=False,
+            direction="bullish",
+        ),
+        raw_json="{}",
+    )
+    pulse = await open_store.symbol_pulse(minutes=60 * 24 * 365, limit=10)
+    assert pulse["XC"]["articles"] == 2
+    assert pulse["XC"]["alerts"] == {"earnings_keyword": 1}
+    assert pulse["XC"]["direction"]["bullish"] == 1
+    assert pulse["XC"]["latest_headline"] in (
+        "XCorp beats earnings", "XCorp raises outlook",
+    )
+    assert pulse["YC"]["articles"] == 1
+
+    # Symbol-scoped variant.
+    only = await open_store.symbol_pulse(
+        minutes=60 * 24 * 365, symbols=["YC"], limit=10
+    )
+    assert set(only) == {"YC"}

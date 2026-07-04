@@ -1245,6 +1245,101 @@ class Store:
         await cur.close()
         return {r["symbol"]: int(r["c"]) for r in rows}
 
+    async def symbol_pulse(
+        self,
+        *,
+        minutes: int,
+        symbols: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, dict[str, Any]]:
+        """Per-symbol news pulse: article velocity, alert-category counts,
+        direction skew, and the latest headline — 'what is the news saying
+        about X' without shipping article bodies."""
+        since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+        params: list[Any] = [since]
+        symbol_clause = ""
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            symbol_clause = f" AND symbol IN ({placeholders})"
+            params.extend(s.upper() for s in symbols)
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, COUNT(DISTINCT article_id) AS articles
+            FROM news_symbol_index
+            WHERE received_at >= ?{symbol_clause}
+            GROUP BY symbol
+            ORDER BY articles DESC, symbol ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        out: dict[str, dict[str, Any]] = {
+            r["symbol"]: {
+                "articles": int(r["articles"]),
+                "alerts": {},
+                "direction": {"bullish": 0, "bearish": 0, "neutral": 0},
+                "latest_headline": None,
+                "latest_at": None,
+            }
+            for r in rows
+        }
+        if not out:
+            return out
+        selected = sorted(out)
+        placeholders = ",".join("?" * len(selected))
+
+        # Latest headline per selected symbol.
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, headline, at FROM (
+                SELECT s.symbol AS symbol, a.headline AS headline,
+                       COALESCE(a.updated_at, a.created_at, a.first_seen_at) AS at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.symbol
+                           ORDER BY COALESCE(a.updated_at, a.created_at,
+                                             a.first_seen_at) DESC
+                       ) AS rn
+                FROM news_symbol_index s
+                JOIN news_articles a ON a.id = s.article_id
+                WHERE s.received_at >= ? AND s.symbol IN ({placeholders})
+            ) WHERE rn = 1
+            """,
+            (since, *selected),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            out[r["symbol"]]["latest_headline"] = r["headline"]
+            out[r["symbol"]]["latest_at"] = r["at"]
+
+        # Alert category + direction counts per symbol (symbols_json is a
+        # JSON array; json_each unnests it).
+        cur = await self.rconn.execute(
+            f"""
+            SELECT je.value AS symbol, al.category AS category,
+                   al.direction AS direction, COUNT(*) AS c
+            FROM alerts al, json_each(al.symbols_json) je
+            WHERE al.created_at >= ? AND je.value IN ({placeholders})
+            GROUP BY je.value, al.category, al.direction
+            """,
+            (since, *selected),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            entry = out.get(r["symbol"])
+            if entry is None:
+                continue
+            entry["alerts"][r["category"]] = (
+                entry["alerts"].get(r["category"], 0) + int(r["c"])
+            )
+            direction = r["direction"] or "neutral"
+            if direction in entry["direction"]:
+                entry["direction"][direction] += int(r["c"])
+        return out
+
     async def prune_retention(
         self, *, event_days: int, raw_event_days: int
     ) -> dict[str, int]:

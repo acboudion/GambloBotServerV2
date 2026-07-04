@@ -797,6 +797,67 @@ def register(mcp: FastMCP) -> None:
             "versions": [v.model_dump() for v in versions],
         }
 
+    @mcp.tool(
+        description=(
+            "Per-symbol news pulse over a window: article velocity, "
+            "bullish/bearish skew, alert-category counts, and the latest "
+            "headline — 'what is the news saying about X' without article "
+            "bodies. Without symbols, returns the busiest `top` symbols."
+        )
+    )
+    async def get_news_pulse(
+        symbols: list[str] | None = None,
+        minutes: int = 240,
+        top: int = 20,
+    ) -> dict[str, Any]:
+        if (over := _filter_over_cap(symbols)) is not None:
+            return over
+        if top > MAX_SYMBOLS_PER_LOOKUP:
+            return _limit_exceeded(MAX_SYMBOLS_PER_LOOKUP, top)
+        minutes = min(max(1, minutes), MAX_SYMBOL_MAP_MINUTES)
+        app = get_app_state()
+        pulse = await app.store.symbol_pulse(
+            minutes=minutes, symbols=symbols, limit=max(1, top)
+        )
+        return {"window_minutes": minutes, "symbols": pulse, "count": len(pulse)}
+
+    @mcp.tool(
+        description=(
+            "Deep news history fetch for specific symbols via Alpaca REST "
+            "(history reaches back years; <=5 symbols, <=365 days, <=500 "
+            "articles). Ingests into the local store — searchable via "
+            "search_news, versioned, symbol-indexed — and returns counts. "
+            "Use when evaluating an unfamiliar ticker."
+        )
+    )
+    async def fetch_news_history(
+        symbols: list[str], days: int = 30, max_articles: int = 200
+    ) -> dict[str, Any]:
+        if not symbols:
+            return _err("no_symbols", "pass 1-5 ticker symbols")
+        if len(symbols) > 5:
+            return _limit_exceeded(5, len(symbols))
+        if days < 1 or days > 365:
+            return _err("invalid_days", "pass days between 1 and 365", min=1, max=365)
+        if max_articles > 500:
+            return _limit_exceeded(500, max_articles)
+        app = get_app_state()
+        result = await app.rest_backfill.history(
+            symbols=[s.strip().upper() for s in symbols if s.strip()],
+            days=days,
+            max_articles=max(1, max_articles),
+        )
+        failure = result.pop("failure", None)
+        out = {
+            "symbols": sorted({s.strip().upper() for s in symbols if s.strip()}),
+            "window_days": days,
+            **result,
+            "status": "incomplete" if failure else "ok",
+        }
+        if failure:
+            out["failure"] = failure
+        return out
+
     @mcp.tool(description="Trigger an Alpaca News REST backfill over the past `minutes`.")
     async def run_news_rest_backfill(minutes: int = 30) -> dict[str, Any]:
         app = get_app_state()

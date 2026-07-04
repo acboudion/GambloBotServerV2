@@ -122,8 +122,29 @@ class RestBackfillWorker:
         start = datetime.now(UTC) - timedelta(minutes=minutes)
         return await self._run(start_iso=start.isoformat(), reason="manual")
 
+    async def history(
+        self, *, symbols: list[str], days: int, max_articles: int
+    ) -> dict[str, Any]:
+        """Symbol-scoped deep fetch (bot-triggered, e.g. evaluating an
+        unfamiliar ticker). Shares _run_lock with startup/gap-fill runs;
+        bounded to max_articles (<= ~10 pages), so it holds the lock for
+        seconds, not minutes."""
+        start = datetime.now(UTC) - timedelta(days=days)
+        return await self._run(
+            start_iso=start.isoformat(),
+            reason="history",
+            symbols=symbols,
+            max_items=max_articles,
+        )
+
     async def _run(
-        self, *, start_iso: str, reason: str, raise_on_failure: bool = False
+        self,
+        *,
+        start_iso: str,
+        reason: str,
+        raise_on_failure: bool = False,
+        symbols: list[str] | None = None,
+        max_items: int | None = None,
     ) -> dict[str, Any]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
@@ -144,6 +165,8 @@ class RestBackfillWorker:
                 "sort": "asc",
                 "limit": 50,
             }
+            if symbols:
+                params["symbols"] = ",".join(sorted({s.strip().upper() for s in symbols}))
             if self._config.rest_include_content:
                 params["include_content"] = "true"
             if self._config.rest_exclude_contentless:
@@ -156,6 +179,7 @@ class RestBackfillWorker:
             max_pages = MAX_BACKFILL_PAGES
             max_429_retries = MAX_429_RETRIES
             retries_429 = 0
+            truncated = False
 
             while pages < max_pages:
                 if page_token:
@@ -221,9 +245,21 @@ class RestBackfillWorker:
                 news = data.get("news") or []
                 for item in news:
                     counts[await self._ingest_one(item)] += 1
+                    if (
+                        max_items is not None
+                        and counts["new"] + counts["updated"] + counts["duplicate"]
+                        >= max_items
+                    ):
+                        truncated = True
+                        break
                 pages += 1
                 page_token = data.get("next_page_token") or None
                 backoff = max(1.0, backoff / 2)
+                if truncated:
+                    # Bounded fetch (history tool) reached its item budget —
+                    # an intentional stop, not an incomplete window.
+                    page_token = None
+                    break
                 if not page_token:
                     break
 
@@ -260,6 +296,7 @@ class RestBackfillWorker:
                 "duplicate": counts["duplicate"],
                 "failed": counts["failed"],
                 "pages": pages,
+                "truncated": truncated,
                 # Non-raising callers (startup, manual tool) must still be able
                 # to tell an incomplete run from a clean one.
                 "failure": failure,
