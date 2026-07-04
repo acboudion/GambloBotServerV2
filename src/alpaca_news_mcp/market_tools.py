@@ -690,7 +690,7 @@ def register(mcp: FastMCP) -> None:
         if cursor:
             _apply_gap_info(
                 out, cursor=cursor, latest=latest,
-                min_seq=await market_store.min_bar_seq(),
+                min_seq=await market_store.min_bar_seq(symbols, timeframe),
             )
         return out
 

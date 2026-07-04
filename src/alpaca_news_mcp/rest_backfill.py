@@ -132,7 +132,11 @@ class RestBackfillWorker:
 
         Pages newest-first: when the window holds more than max_articles,
         the cap must keep the recent catalysts the bot is evaluating, not
-        the oldest articles in the window."""
+        the oldest articles in the window.
+
+        Ingests without emitting alerts: AlertEngine stamps created_at=now,
+        so a year-old bankruptcy headline pulled for research would surface
+        in get_alerts_since/poll_market as a fresh critical alert."""
         start = datetime.now(UTC) - timedelta(days=days)
         return await self._run(
             start_iso=start.isoformat(),
@@ -140,6 +144,7 @@ class RestBackfillWorker:
             symbols=symbols,
             max_items=max_articles,
             sort="desc",
+            emit_alerts=False,
         )
 
     async def _run(
@@ -151,6 +156,7 @@ class RestBackfillWorker:
         symbols: list[str] | None = None,
         max_items: int | None = None,
         sort: str = "asc",
+        emit_alerts: bool = True,
     ) -> dict[str, Any]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
@@ -253,7 +259,7 @@ class RestBackfillWorker:
                     break
                 news = data.get("news") or []
                 for item in news:
-                    counts[await self._ingest_one(item)] += 1
+                    counts[await self._ingest_one(item, emit_alerts=emit_alerts)] += 1
                     if (
                         max_items is not None
                         and counts["new"] + counts["updated"] + counts["duplicate"]
@@ -311,7 +317,9 @@ class RestBackfillWorker:
                 "failure": failure,
             }
 
-    async def _ingest_one(self, payload: dict[str, Any]) -> IngestStatus:
+    async def _ingest_one(
+        self, payload: dict[str, Any], *, emit_alerts: bool = True
+    ) -> IngestStatus:
         try:
             normalized = normalize_news_message(payload)
         except NormalizationError as e:
@@ -327,7 +335,10 @@ class RestBackfillWorker:
         # high-latency alerts on REST ingest: `latency_ms` is computed against
         # `created_at`, so historical backfill items would always trip the
         # threshold and drown out genuine real-time pipeline alerts.
-        if result.was_new or result.version_inserted:
+        # emit_alerts=False (history fetches) ingests/search-indexes only:
+        # alerts carry created_at=now, so old research articles would land
+        # in the live alert feed as fresh events.
+        if emit_alerts and (result.was_new or result.version_inserted):
             interest = self._state.get_interest_symbols()
             for alert in self._alerts.evaluate_article(
                 result.article,

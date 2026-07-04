@@ -86,7 +86,7 @@ async def _news_section(
     if cursor:
         apply_gap_info(
             out, cursor=cursor, latest=latest,
-            min_seq=await app.store.min_article_seq(),
+            min_seq=await app.store.min_article_seq(symbols),
         )
     return out
 
@@ -146,7 +146,7 @@ async def _bars_section(
     if cursor:
         apply_gap_info(
             out, cursor=cursor, latest=latest,
-            min_seq=await app.market_store.min_bar_seq(),
+            min_seq=await app.market_store.min_bar_seq(symbols),
         )
     return out
 

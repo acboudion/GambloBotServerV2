@@ -302,3 +302,32 @@ async def test_full_prune_still_flags_gap(app):
     out2 = await _call(mcp, "get_news_since", cursor=out["latest_cursor"])
     assert out2["count"] == 0
     assert "gap" not in out2
+
+
+@pytest.mark.asyncio
+async def test_symbol_filtered_gap_uses_filtered_minimum(app):
+    """Gap detection for a symbol-filtered feed must use the filtered
+    minimum seq: an unrelated symbol's older retained article would
+    otherwise mask that matching articles past the cursor were pruned."""
+    mcp = build_mcp()
+    await _ingest(app.store, 1, "msft story", symbols=["MSFT"])
+    old = {
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2020-01-01T00:00:01Z",
+    }
+    await _ingest(app.store, 2, "aapl old 1", symbols=["AAPL"], **old)
+    await _ingest(app.store, 3, "aapl old 2", symbols=["AAPL"], **old)
+    async with app.store._write_lock:
+        await app.store.conn.execute(
+            "UPDATE news_articles SET first_seen_at = '2020-01-02T00:00:00+00:00' "
+            "WHERE id IN (2, 3)"
+        )
+        await app.store.conn.commit()
+    await app.store.prune_retention(event_days=1, raw_event_days=1)
+    await _ingest(app.store, 4, "aapl new", symbols=["AAPL"])
+
+    # AAPL feed: seqs 2-3 are gone; the retained MSFT seq 1 must not hide it.
+    out = await _call(mcp, "get_news_since", cursor=1, symbols=["AAPL"])
+    assert [a["id"] for a in out["articles"]] == [4]
+    assert out["gap"] is True
+    assert out["oldest_available_cursor"] == 3

@@ -146,6 +146,30 @@ async def test_unchanged_bar_redelivery_does_not_advance_cursor(market_store):
 
 
 @pytest.mark.asyncio
+async def test_min_bar_seq_uses_filters(market_store):
+    """Bar retention prunes by bar TIMESTAMP, so another symbol can retain
+    an older seq while the requested symbol's rows were pruned — the
+    filtered minimum must expose that gap instead of masking it."""
+    now_ts = int(datetime.now(UTC).timestamp()) // 60 * 60
+    old_ts = now_ts - 40 * 86_400
+    await market_store.persist_stream_batch(
+        bars=[("TSLA", "1min", now_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0)]  # seq 1
+    )
+    await market_store.persist_stream_batch(bars=[
+        ("AAPL", "1min", old_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0),        # seq 2
+        ("AAPL", "1min", old_ts + 60, 1, 2, 0.5, 1.5, 1, 1, 1.0),   # seq 3
+    ])
+    await market_store.prune(tick_retention_minutes=240, bar_retention_days=30)
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", now_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0)]  # seq 4
+    )
+    assert await market_store.min_bar_seq() == 1  # TSLA row masks the prune
+    assert await market_store.min_bar_seq(symbols=["AAPL"]) == 4
+    assert await market_store.min_bar_seq(timeframe="1min") == 1
+    assert await market_store.min_bar_seq(symbols=["aapl"], timeframe="1min") == 4
+
+
+@pytest.mark.asyncio
 async def test_raw_events_retained_beyond_tick_window(market_store):
     """Raw statuses/corrections are the low-volume audit trail — they keep
     the day-scale status retention, not the 4-hour tick window that would

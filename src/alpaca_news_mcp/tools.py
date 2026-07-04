@@ -264,7 +264,7 @@ def register(mcp: FastMCP) -> None:
         if cursor:
             _apply_gap_info(
                 out, cursor=cursor, latest=latest,
-                min_seq=await app.store.min_article_seq(),
+                min_seq=await app.store.min_article_seq(symbols),
             )
         return out
 
@@ -843,6 +843,7 @@ def register(mcp: FastMCP) -> None:
             "(history reaches back years; <=5 symbols, <=365 days, <=500 "
             "articles). Ingests into the local store — searchable via "
             "search_news, versioned, symbol-indexed — and returns counts. "
+            "Never emits live alerts (research material, not fresh events). "
             "Use when evaluating an unfamiliar ticker."
         )
     )

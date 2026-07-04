@@ -873,10 +873,21 @@ class Store:
     def latest_alert_cursor(self) -> int:
         return self._next_alert_seq - 1
 
-    async def min_article_seq(self) -> int:
-        cur = await self.rconn.execute(
-            "SELECT COALESCE(MIN(seq), 0) FROM news_articles"
-        )
+    async def min_article_seq(self, symbols: list[str] | None = None) -> int:
+        """Oldest retained article seq, optionally under the same symbol
+        filter articles_since applies. Gap detection for a filtered feed
+        must use the filtered minimum: an unrelated symbol's older retained
+        article would otherwise mask pruned matching articles."""
+        sql = "SELECT COALESCE(MIN(seq), 0) FROM news_articles"
+        params: list[Any] = []
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            sql += (
+                " WHERE id IN (SELECT article_id FROM news_symbol_index "
+                f"WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        cur = await self.rconn.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
         return int(row[0]) if row else 0

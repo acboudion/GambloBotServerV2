@@ -575,8 +575,28 @@ class MarketStore:
         """Highest allocated bar seq; see Store.latest_article_cursor."""
         return self._next_bar_seq - 1
 
-    async def min_bar_seq(self) -> int:
-        cur = await self.rconn.execute("SELECT COALESCE(MIN(seq), 0) FROM stock_bars")
+    async def min_bar_seq(
+        self,
+        symbols: list[str] | None = None,
+        timeframe: str | None = None,
+    ) -> int:
+        """Oldest retained bar seq under the same filters bars_since applies.
+        Bar retention prunes by bar timestamp, so another symbol/timeframe
+        can retain an older seq while the requested stream lost rows — the
+        global minimum would mask that gap."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend([s.upper() for s in symbols])
+        if timeframe:
+            clauses.append("timeframe = ?")
+            params.append(timeframe)
+        sql = "SELECT COALESCE(MIN(seq), 0) FROM stock_bars"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        cur = await self.rconn.execute(sql, params)
         row = await cur.fetchone()
         await cur.close()
         return int(row[0]) if row else 0
