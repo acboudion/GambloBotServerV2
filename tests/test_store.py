@@ -408,3 +408,43 @@ async def test_batch_writer_rolls_back_when_commit_fails(open_store, monkeypatch
     )
     assert await open_store.get_article(3000) is None
     assert await open_store.get_article(3001) is not None
+
+
+@pytest.mark.asyncio
+async def test_reads_use_isolated_connection(open_store):
+    # File-backed store gets a dedicated read-only connection.
+    assert open_store._read_conn is not None
+    assert open_store.rconn is open_store._read_conn
+
+
+@pytest.mark.asyncio
+async def test_reader_does_not_see_uncommitted_batch(open_store):
+    """Tool reads must see only committed data: a batch transaction in
+    flight (or later rolled back) must never leak phantom articles."""
+    committed = normalize_news_message(_payload(900, headline="committed"))
+    await open_store.upsert_article(committed, source_kind="ws")
+
+    class Boom(RuntimeError):
+        pass
+
+    with pytest.raises(Boom):
+        async with open_store.batch_writer() as writer:
+            uncommitted = normalize_news_message(_payload(901, headline="phantom"))
+            await writer.upsert_article(uncommitted, source_kind="ws")
+            # Mid-transaction: the writer connection has the row, but tool
+            # reads (rconn) must not observe it.
+            articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+            assert [a.id for a in articles] == [900]
+            assert await open_store.get_article(901) is None
+            raise Boom()
+
+    # Rolled back: still invisible.
+    articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+    assert [a.id for a in articles] == [900]
+
+    # A committed batch becomes visible to the read connection.
+    async with open_store.batch_writer() as writer:
+        replacement = normalize_news_message(_payload(902, headline="real"))
+        await writer.upsert_article(replacement, source_kind="ws")
+    articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+    assert [a.id for a in articles] == [900, 902]

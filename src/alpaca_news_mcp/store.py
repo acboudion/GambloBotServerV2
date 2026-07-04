@@ -59,10 +59,40 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+async def open_read_connection(path: str) -> aiosqlite.Connection | None:
+    """Open a read-only companion connection (WAL snapshot isolation).
+
+    Tool reads must never share the writer's connection: on a shared
+    connection a SELECT issued while a batch transaction is open sees
+    uncommitted rows — phantom articles/alerts that vanish on rollback —
+    and queues behind long prunes. A separate mode=ro connection reads
+    the last committed WAL snapshot instead.
+
+    Returns None (callers fall back to the writer connection) for
+    :memory: databases — a second connection would see a different,
+    empty database — or if the read-only open fails for any reason.
+    """
+    if not path or path == ":memory:":
+        return None
+    try:
+        conn = await aiosqlite.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+    except Exception as e:
+        log.warning(
+            "read-only connection unavailable for %s (%s); reads share the writer",
+            path,
+            e,
+        )
+        return None
+
+
 class Store:
     def __init__(self, path: str) -> None:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
         self._next_seq: int = 1
 
@@ -79,6 +109,9 @@ class Store:
         return store
 
     async def close(self) -> None:
+        if self._read_conn is not None:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -88,6 +121,11 @@ class Store:
         if self._conn is None:
             raise RuntimeError("Store is not open")
         return self._conn
+
+    @property
+    def rconn(self) -> aiosqlite.Connection:
+        """Read connection for tool queries; the writer when unavailable."""
+        return self._read_conn if self._read_conn is not None else self.conn
 
     async def init_schema(self) -> None:
         sql_text = resources.files("alpaca_news_mcp").joinpath("schema.sql").read_text(
@@ -101,6 +139,9 @@ class Store:
             row = await cur.fetchone()
             await cur.close()
             self._next_seq = (int(row[0]) if row else 0) + 1
+        # After the schema exists and WAL mode is committed — mode=ro on a
+        # nonexistent file would fail.
+        self._read_conn = await open_read_connection(self.path)
 
     def _allocate_seq(self) -> int:
         """Next monotonic ingest sequence. Callers must hold the write lock."""
@@ -467,7 +508,7 @@ class Store:
         """Queue-overflow-dropped articles not yet replayed, oldest first.
         Each entry: {event_id, payload} where payload is the parsed article
         dict (None if the stored JSON is unparseable)."""
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT event_id, raw_json FROM raw_events "
             "WHERE message_type = 'queue_overflow_drop' AND replayed = 0 "
             "ORDER BY received_at ASC LIMIT ?",
@@ -572,7 +613,7 @@ class Store:
             await self.conn.commit()
 
     async def get_status(self, key: str) -> dict[str, Any] | None:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT value_json FROM stream_status WHERE key = ?", (key,)
         )
         row = await cur.fetchone()
@@ -585,7 +626,7 @@ class Store:
             return None
 
     async def get_article(self, article_id: int) -> NewsArticle | None:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT * FROM news_articles WHERE id = ?", (article_id,)
         )
         row = await cur.fetchone()
@@ -624,7 +665,7 @@ class Store:
             + " ORDER BY COALESCE(updated_at, created_at, first_seen_at) DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
@@ -692,7 +733,7 @@ class Store:
             + " ORDER BY f.rank LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
@@ -732,7 +773,7 @@ class Store:
             + " ORDER BY COALESCE(updated_at, created_at, first_seen_at) DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
@@ -763,7 +804,7 @@ class Store:
             + " ORDER BY seq ASC LIMIT ?"
         )
         params.append(limit + 1)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = list(await cur.fetchall())
         await cur.close()
         has_more = len(rows) > limit
@@ -802,7 +843,7 @@ class Store:
             + " ORDER BY rowid ASC LIMIT ?"
         )
         params.append(limit + 1)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = list(await cur.fetchall())
         await cur.close()
         has_more = len(rows) > limit
@@ -843,7 +884,7 @@ class Store:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
         for sym in symbols:
             sym_u = sym.upper()
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 """
                 SELECT a.* FROM news_articles a
                 JOIN news_symbol_index s ON s.article_id = a.id
@@ -862,7 +903,7 @@ class Store:
         self, article_id: int, limit: int | None = None
     ) -> list[NewsArticleVersion]:
         if limit is None:
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 "SELECT * FROM news_article_versions WHERE article_id = ? "
                 "ORDER BY received_at ASC",
                 (article_id,),
@@ -871,7 +912,7 @@ class Store:
             # Pull the most recent `limit` rows at the SQL level so we don't
             # read or deserialize the full version history, then re-sort ASC
             # to keep the existing oldest-first response ordering.
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 "SELECT * FROM ("
                 "  SELECT * FROM news_article_versions WHERE article_id = ? "
                 "  ORDER BY received_at DESC LIMIT ?"
@@ -895,7 +936,7 @@ class Store:
         ]
 
     async def count_versions(self, article_id: int) -> int:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT COUNT(*) FROM news_article_versions WHERE article_id = ?",
             (article_id,),
         )
@@ -934,7 +975,7 @@ class Store:
             + " ORDER BY created_at DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [
@@ -955,7 +996,7 @@ class Store:
 
     async def latency_stats(self, minutes: int) -> LatencyStats:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT latency_ms FROM news_articles "
             "WHERE first_seen_at >= ? AND latency_ms IS NOT NULL AND latency_ms >= 0",
             (since,),
@@ -993,7 +1034,7 @@ class Store:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
 
         async def _count(sql: str) -> int:
-            cur = await self.conn.execute(sql, (since,))
+            cur = await self.rconn.execute(sql, (since,))
             row = await cur.fetchone()
             await cur.close()
             return int(row["c"]) if row is not None else 0
@@ -1028,7 +1069,7 @@ class Store:
         self, *, minutes: int, limit: int = 100
     ) -> list[dict[str, Any]]:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT event_id, received_at, endpoint, message_type, raw_json "
             "FROM raw_events WHERE received_at >= ? ORDER BY received_at DESC LIMIT ?",
             (since, limit),
@@ -1056,7 +1097,7 @@ class Store:
         self, *, minutes: int, min_articles: int
     ) -> dict[str, int]:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             """
             SELECT symbol, COUNT(DISTINCT article_id) as c
             FROM news_symbol_index

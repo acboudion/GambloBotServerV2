@@ -163,3 +163,33 @@ async def test_failed_batch_rolls_back(market_store):
     assert trades == []  # the rolled-back trade never landed
     quotes = await market_store.quotes_window("AAPL", since_us=0, limit=10)
     assert len(quotes) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_reads_use_isolated_connection(market_store):
+    assert market_store._read_conn is not None
+    assert market_store.rconn is market_store._read_conn
+
+    # Committed data is visible through the read connection.
+    now = datetime.now(UTC)
+    await market_store.persist_stream_batch(
+        trades=[("AAPL", _us(now), 190.0, 100, "V", "@", "C", 1)]
+    )
+    got = await market_store.trades_window(
+        "AAPL", since_us=_us(now - timedelta(minutes=1)), limit=10
+    )
+    assert len(got) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_store_falls_back_to_writer_connection():
+    store = await MarketStore.open(":memory:")
+    await store.init_schema()
+    try:
+        assert store._read_conn is None
+        assert store.rconn is store.conn
+        # Reads still work on the shared connection.
+        got = await store.trades_window("AAPL", since_us=0, limit=5)
+        assert got == []
+    finally:
+        await store.close()

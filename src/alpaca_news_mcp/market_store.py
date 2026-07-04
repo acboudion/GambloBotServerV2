@@ -19,6 +19,7 @@ from typing import Any
 import aiosqlite
 
 from .logging_utils import get_logger
+from .store import open_read_connection
 
 log = get_logger(__name__)
 
@@ -72,6 +73,7 @@ class MarketStore:
     def __init__(self, path: str) -> None:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
         self._next_bar_seq: int = 1
         self.snapshots = MarketSnapshotCache()
@@ -88,6 +90,9 @@ class MarketStore:
         return store
 
     async def close(self) -> None:
+        if self._read_conn is not None:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -97,6 +102,11 @@ class MarketStore:
         if self._conn is None:
             raise RuntimeError("MarketStore is not open")
         return self._conn
+
+    @property
+    def rconn(self) -> aiosqlite.Connection:
+        """Read connection for tool queries; the writer when unavailable."""
+        return self._read_conn if self._read_conn is not None else self.conn
 
     async def init_schema(self) -> None:
         sql_text = (
@@ -111,6 +121,9 @@ class MarketStore:
             row = await cur.fetchone()
             await cur.close()
             self._next_bar_seq = (int(row[0]) if row else 0) + 1
+        # After the schema exists and WAL mode is committed — mode=ro on a
+        # nonexistent file would fail.
+        self._read_conn = await open_read_connection(self.path)
 
     # ---- batch write path -----------------------------------------------------
 
@@ -211,7 +224,7 @@ class MarketStore:
     async def trades_window(
         self, symbol: str, *, since_us: int, limit: int
     ) -> list[dict[str, Any]]:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT * FROM ("
             "  SELECT ts_us, price, size, exchange, conditions, tape FROM stock_trades"
             "  WHERE symbol = ? AND ts_us >= ? ORDER BY ts_us DESC LIMIT ?"
@@ -225,7 +238,7 @@ class MarketStore:
     async def quotes_window(
         self, symbol: str, *, since_us: int, limit: int
     ) -> list[dict[str, Any]]:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT * FROM ("
             "  SELECT ts_us, bid_price, bid_size, ask_price, ask_size, tape FROM stock_quotes"
             "  WHERE symbol = ? AND ts_us >= ? ORDER BY ts_us DESC LIMIT ?"
@@ -260,7 +273,7 @@ class MarketStore:
             ") ORDER BY ts ASC"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -289,7 +302,7 @@ class MarketStore:
             + " ORDER BY seq ASC LIMIT ?"
         )
         params.append(limit + 1)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = list(await cur.fetchall())
         await cur.close()
         has_more = len(rows) > limit
@@ -302,7 +315,7 @@ class MarketStore:
         if not symbols:
             return {}
         placeholders = ",".join("?" * len(symbols))
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             f"SELECT symbol, MAX(ts) AS max_ts FROM stock_bars "
             f"WHERE timeframe = ? AND symbol IN ({placeholders}) GROUP BY symbol",
             (timeframe, *[s.upper() for s in symbols]),
@@ -330,7 +343,7 @@ class MarketStore:
             + " ORDER BY ts_us DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -354,7 +367,7 @@ class MarketStore:
             + " ORDER BY ts_us DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [dict(r) for r in rows]
@@ -365,14 +378,14 @@ class MarketStore:
         )
         out: dict[str, int] = {}
         for table in TICK_TABLES:
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 f"SELECT COUNT(*) AS c FROM {table} WHERE ts_us >= ?", (since_us,)
             )
             row = await cur.fetchone()
             await cur.close()
             out[table.removeprefix("stock_")] = int(row["c"]) if row else 0
         since_s = since_us // 1_000_000
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT COUNT(*) AS c FROM stock_bars WHERE ts >= ?", (since_s,)
         )
         row = await cur.fetchone()
