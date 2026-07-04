@@ -31,6 +31,10 @@ SubscriptionMode = Literal["wildcard", "fallback", "rest_only", "disconnected"]
 log = get_logger(__name__)
 
 SUBSCRIPTION_TIMEOUT_SECONDS = 10.0
+# Used when an entitlement rejection (409) forces the wildcard subscription
+# down to a symbol list and NEWS_FALLBACK_SYMBOLS is unset — subscribing to
+# nothing would silently starve the bot of news for the life of the process.
+DEFAULT_FALLBACK_SYMBOLS = ("AAPL", "MSFT", "NVDA")
 # Max articles persisted per batch commit. News volume is low; this only
 # matters during backfill floods and reconnect bursts.
 PERSIST_BATCH_MAX = 64
@@ -60,6 +64,9 @@ class NewsStreamWorker(BaseStreamWorker):
             gap_fill_callback=gap_fill_callback,
         )
         self._replay_task: asyncio.Task[None] | None = None
+        # One wildcard→fallback downgrade per session; a second 409 forces a
+        # reconnect instead of a resubscribe loop.
+        self._entitlement_downgraded = False
 
     async def start(self) -> None:
         await super().start()
@@ -124,6 +131,8 @@ class NewsStreamWorker(BaseStreamWorker):
             if item.get("code") == 402:
                 self._fatal_auth = True
                 return False
+            if item.get("code") == 409:
+                return await self._downgrade_after_entitlement_rejection(ws)
         elif t == "success":
             pass  # heartbeat-like
         else:
@@ -136,14 +145,48 @@ class NewsStreamWorker(BaseStreamWorker):
 
     # ---- subscription ----------------------------------------------------------
 
+    def _fallback_symbols(self) -> list[str]:
+        return self._config.news_fallback_symbols or list(DEFAULT_FALLBACK_SYMBOLS)
+
+    async def _downgrade_after_entitlement_rejection(self, ws: Any) -> bool:
+        """A 409 arriving AFTER the subscribe ack window (handle_item path).
+
+        Without this, a late entitlement rejection left the session
+        authenticated with no subscription at all — and with the news idle
+        watchdog off by default, no reconnect ever fired: zero news forever.
+        Returns False (forcing a reconnect) when a downgrade already happened
+        this session or the mode is not wildcard."""
+        if self._entitlement_downgraded:
+            return False
+        if self._state.subscription_state.mode != "wildcard":
+            return False
+        self._entitlement_downgraded = True
+        requested = {"news": self._fallback_symbols()}
+        log.info(
+            "late entitlement rejection; downgrading to symbol-list subscription"
+        )
+        try:
+            await ws.send(
+                orjson.dumps({"action": "subscribe", **requested}).decode("utf-8")
+            )
+        except Exception:
+            return False
+        self._state.subscription_state = SubscriptionState(
+            requested=requested, mode="fallback", last_ack_at=None
+        )
+        self._state.update_health(
+            requested_subscription=requested, subscription_mode="fallback"
+        )
+        return True
+
     async def _subscribe(self, ws: Any) -> None:
+        self._entitlement_downgraded = False
         mode_str = self._config.news_subscription_mode
         mode: SubscriptionMode = "wildcard" if mode_str == "wildcard" else "fallback"
         if mode == "wildcard":
             requested = {"news": ["*"]}
         else:
-            symbols = self._config.news_fallback_symbols or ["AAPL", "MSFT", "NVDA"]
-            requested = {"news": symbols}
+            requested = {"news": self._fallback_symbols()}
         await ws.send(
             orjson.dumps({"action": "subscribe", **requested}).decode("utf-8")
         )
@@ -196,14 +239,11 @@ class NewsStreamWorker(BaseStreamWorker):
                     # Only entitlement rejection (409) should downgrade
                     # wildcard → fallback. Transient/unrelated errors must
                     # not permanently narrow coverage for this session.
-                    if (
-                        item.get("code") == 409
-                        and mode == "wildcard"
-                        and self._config.news_fallback_symbols
-                    ):
+                    if item.get("code") == 409 and mode == "wildcard":
                         log.info("falling back to symbol-list subscription after entitlement rejection")
+                        self._entitlement_downgraded = True
                         mode = "fallback"
-                        requested = {"news": self._config.news_fallback_symbols}
+                        requested = {"news": self._fallback_symbols()}
                         await ws.send(
                             orjson.dumps(
                                 {"action": "subscribe", **requested}
@@ -353,8 +393,13 @@ class NewsStreamWorker(BaseStreamWorker):
                 connection_limit_blocked=True,
                 last_error=f"406 {msg}",
             )
-            await asyncio.sleep(self._config.connection_limit_backoff_seconds)
-            self._state.update_health(connection_limit_blocked=False)
+            # No in-handler sleep: blocking here stalls the whole worker
+            # task. _run consumes the deadline in its wait computation and
+            # clears connection_limit_blocked once it passes.
+            self._backoff_until = (
+                asyncio.get_event_loop().time()
+                + self._config.connection_limit_backoff_seconds
+            )
         elif code == 409:
             self._state.update_health(
                 entitlement_error=True,

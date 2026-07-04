@@ -418,3 +418,70 @@ async def test_stream_error_alerts_are_deduped(wired):
         assert len(errs) == 1
     finally:
         NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_402_quirk_then_message_auth_success_clears_fatal_auth(wired):
+    """A 402 error during the header-auth window followed by successful
+    message auth must not poison the session: the next ordinary disconnect
+    takes the normal backoff, not the 900s auth-retry path with a false
+    critical alert."""
+    cfg, store, state, alerts = wired
+    sessions = {"n": 0}
+
+    async def handler(ws):
+        sessions["n"] += 1
+        await ws.send(orjson.dumps([{"T": "success", "msg": "connected"}]).decode())
+        if sessions["n"] == 1:
+            # Header-auth quirk: reject once, then accept message auth.
+            await ws.send(orjson.dumps(
+                [{"T": "error", "code": 402, "msg": "auth failed"}]
+            ).decode())
+            msg = orjson.loads(await ws.recv())
+            assert msg["action"] == "auth"
+            await ws.send(orjson.dumps(
+                [{"T": "success", "msg": "authenticated"}]
+            ).decode())
+            await ws.recv()  # subscribe
+            await ws.send(orjson.dumps(
+                [{"T": "subscription", "news": ["*"]}]
+            ).decode())
+            await asyncio.sleep(0.2)
+            return  # ordinary disconnect
+        await _handshake(ws)
+        await asyncio.sleep(1.0)
+
+    server, port = await _start_fake_ws(handler)
+    cfg2 = replace(cfg, alpaca_news_stream_url=f"ws://127.0.0.1:{port}/news")
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    try:
+        await worker.start()
+        # Session 2 must start on the ~1s normal cadence — the fatal-auth
+        # path would wait AUTH_RETRY_SECONDS (900s default).
+        assert await _wait_for(lambda: sessions["n"] >= 2, deadline_s=8.0)
+        assert state.snapshot_health().auth_failed is False
+        stored = await store.get_alerts(minutes=5, categories=["stream_error"], limit=10)
+        assert not any("authentication failing" in a.reason for a in stored)
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()
+        NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_406_sets_backoff_deadline_without_blocking(wired):
+    """handle_error(406) must return immediately and leave the backoff to
+    _run's wait computation — sleeping in the handler stalled the worker."""
+    cfg, store, state, alerts = wired
+    cfg2 = replace(cfg, connection_limit_backoff_seconds=30)
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    try:
+        loop = asyncio.get_event_loop()
+        before = loop.time()
+        await worker.handle_error({"T": "error", "code": 406, "msg": "limit"})
+        assert loop.time() - before < 1.0  # no 30s sleep
+        assert state.snapshot_health().connection_limit_blocked is True
+        assert worker._backoff_until > before + 25
+    finally:
+        NewsStreamWorker.reset_singleton()

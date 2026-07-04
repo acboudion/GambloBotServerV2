@@ -384,8 +384,12 @@ class StockStreamWorker(BaseStreamWorker):
                 connection_limit_blocked=True,
                 last_error=f"406 {msg}",
             )
-            await asyncio.sleep(self._config.connection_limit_backoff_seconds)
-            self._state.update_health(self.stream_name, connection_limit_blocked=False)
+            # No in-handler sleep — see NewsStreamWorker.handle_error; _run
+            # consumes the deadline and clears the flag once it passes.
+            self._backoff_until = (
+                asyncio.get_event_loop().time()
+                + self._config.connection_limit_backoff_seconds
+            )
         elif code in (405, 409, 410):
             # Subscription-shaped failures (symbol limit, entitlement, invalid
             # action): alert + record, but keep the connection alive — never

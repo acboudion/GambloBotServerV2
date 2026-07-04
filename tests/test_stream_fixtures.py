@@ -635,3 +635,52 @@ async def test_rolled_back_batch_does_not_advance_watermark(wired, monkeypatch):
     # The batch rolled back: nothing committed, watermark untouched.
     assert state.last_seen_updated_at is None
     assert await store.get_article(1) is None
+
+
+@pytest.mark.asyncio
+async def test_wildcard_409_with_empty_fallback_uses_default_symbols(wired):
+    """Default config has no NEWS_FALLBACK_SYMBOLS; an entitlement
+    rejection must still downgrade to the built-in default list instead of
+    leaving the session subscribed to nothing forever."""
+    cfg, store, state, alerts = wired
+    assert cfg.news_fallback_symbols == []
+    subscribes: list[dict] = []
+
+    async def handler(ws):
+        await ws.send(orjson.dumps([{"T": "success", "msg": "connected"}]).decode())
+        await ws.send(orjson.dumps([{"T": "success", "msg": "authenticated"}]).decode())
+        first = orjson.loads(await ws.recv())
+        subscribes.append(first)
+        await ws.send(orjson.dumps(
+            [{"T": "error", "code": 409, "msg": "insufficient subscription"}]
+        ).decode())
+        second = orjson.loads(await ws.recv())
+        subscribes.append(second)
+        await ws.send(orjson.dumps(
+            [{"T": "subscription", "news": second["news"]}]
+        ).decode())
+        await asyncio.sleep(0.5)
+
+    server, port = await _start_fake_ws(handler)
+    try:
+        from dataclasses import replace
+
+        from alpaca_news_mcp.stream import DEFAULT_FALLBACK_SYMBOLS
+        cfg2 = replace(cfg, alpaca_news_stream_url=f"ws://127.0.0.1:{port}/news")
+        worker = NewsStreamWorker(cfg2, store, state, alerts)
+        await worker.start()
+        for _ in range(80):
+            await asyncio.sleep(0.05)
+            if len(subscribes) >= 2:
+                break
+        assert subscribes[0]["news"] == ["*"]
+        assert subscribes[1]["news"] == list(DEFAULT_FALLBACK_SYMBOLS)
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if state.snapshot_health().subscription_mode == "fallback":
+                break
+        assert state.snapshot_health().subscription_mode == "fallback"
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()

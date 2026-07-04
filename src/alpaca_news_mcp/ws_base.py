@@ -81,6 +81,9 @@ class BaseStreamWorker:
         self._main_task: asyncio.Task[None] | None = None
         self._persister_task: asyncio.Task[None] | None = None
         self._fatal_auth = False
+        # Monotonic deadline set on 406 connection-limit errors; consumed by
+        # _run's wait computation instead of sleeping inside handle_error.
+        self._backoff_until: float = 0.0
         self._authed_this_session = False
         self._last_stale_alert: float | None = None
         self._sessions_authed = 0
@@ -304,6 +307,11 @@ class BaseStreamWorker:
                 base_max = self._config.reconnect_max_seconds
                 wait = min(base_max, base_min * (2 ** min(attempt - 1, 6)))
                 wait = wait * (0.7 + 0.6 * random.random())
+                # A 406 connection-limit error sets a backoff deadline —
+                # honor whichever wait is longer.
+                remaining_backoff = self._backoff_until - loop.time()
+                if remaining_backoff > wait:
+                    wait = remaining_backoff
                 log.info(
                     "%s reconnecting in %.1fs (attempt=%d)", self.stream_name, wait, attempt
                 )
@@ -311,6 +319,11 @@ class BaseStreamWorker:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=wait)
             except TimeoutError:
                 pass
+            if self._backoff_until and loop.time() >= self._backoff_until:
+                self._backoff_until = 0.0
+                self._state.update_health(
+                    self.stream_name, connection_limit_blocked=False
+                )
 
             self._state.update_health(
                 self.stream_name,
@@ -335,6 +348,11 @@ class BaseStreamWorker:
             try:
                 authed = await self._await_auth(ws)
                 if not authed:
+                    if asyncio.get_event_loop().time() < self._backoff_until:
+                        # A 406 just landed — this connection occupies the
+                        # very slot that is exhausted; a message-auth retry
+                        # on it is doomed and only prolongs the conflict.
+                        return
                     # Fall back to message auth.
                     authed = await self._auth_via_message(ws)
                 if not authed:
@@ -344,6 +362,12 @@ class BaseStreamWorker:
                     return
 
                 self._authed_this_session = True
+                # A 402 quirk during the header-auth window may have set
+                # _fatal_auth before message auth succeeded — a session that
+                # actually authenticated must not take the slow auth-retry
+                # path (plus a false critical alert) on its next ordinary
+                # disconnect.
+                self._fatal_auth = False
                 self._state.update_health(
                     self.stream_name, authenticated=True, auth_failed=False
                 )
