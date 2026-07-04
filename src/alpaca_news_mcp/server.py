@@ -24,9 +24,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 
 from . import market_tools as market_tools_mod
+from . import poll_tools as poll_tools_mod
 from . import resources as resources_mod
 from . import tools as tools_mod
-from .alerts import AlertEngine
+from .alerts import AlertEngine, clean_keyword_overrides
 from .app_state import AppState, clear_app_state, get_app_state, set_app_state
 from .config import Config
 from .logging_utils import configure_logging, get_logger
@@ -59,6 +60,25 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         keywords_file=config.alert_keywords_file or None,
         rate_limit_per_symbol_hour=config.alert_rate_limit_per_symbol_hour,
     )
+    # Restore bot-managed runtime state (keyword groups, watched stories).
+    persisted_overrides = await store.get_status(
+        tools_mod.ALERT_KEYWORD_OVERRIDES_KEY
+    )
+    if persisted_overrides:
+        alerts.rebuild(
+            clean_keyword_overrides(
+                persisted_overrides, source="persisted keyword overrides"
+            )
+        )
+    persisted_watches = await store.get_status(tools_mod.WATCHED_STORIES_KEY)
+    if persisted_watches and isinstance(persisted_watches.get("articles"), dict):
+        state_watches: dict[int, str] = {}
+        for key, value in persisted_watches["articles"].items():
+            try:
+                state_watches[int(key)] = str(value)
+            except (TypeError, ValueError):
+                continue
+        state.restore_watched_articles(state_watches)
     rest_backfill = RestBackfillWorker(config, store, state, alerts)
     NewsStreamWorker.reset_singleton()
     stream = NewsStreamWorker(
@@ -99,11 +119,21 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
     )
     set_app_state(app_state)
 
+    backfill_task: asyncio.Task[None] | None = None
     if config.enable_rest_backfill:
-        try:
-            await rest_backfill.backfill_startup()
-        except Exception as e:
-            log.warning("startup backfill failed (continuing): %s", e)
+        # Background task: a long backfill window must not delay stream
+        # startup or keep /healthz returning 503 (docker healthchecks would
+        # kill the container). Article upserts dedup, so running it
+        # concurrently with the live stream is safe.
+        async def _startup_backfill() -> None:
+            try:
+                await rest_backfill.backfill_startup()
+            except Exception as e:
+                log.warning("startup backfill failed (continuing): %s", e)
+
+        backfill_task = asyncio.create_task(
+            _startup_backfill(), name="startup-backfill"
+        )
 
     await stream.start()
     if stock_stream is not None:
@@ -121,7 +151,7 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         yield app_state
     finally:
         log.info("alpaca-news-mcp shutting down")
-        for task in (pruner_task, market_pruner_task):
+        for task in (backfill_task, pruner_task, market_pruner_task):
             if task is None:
                 continue
             task.cancel()
@@ -169,6 +199,7 @@ async def _market_retention_loop(app_state: AppState) -> None:
             deleted = await app_state.market_store.prune(
                 tick_retention_minutes=app_state.config.stock_tick_retention_minutes,
                 bar_retention_days=app_state.config.stock_bar_retention_days,
+                status_retention_days=app_state.config.status_retention_days,
             )
             if any(deleted.values()):
                 log.info("market retention pruned: %s", deleted)
@@ -189,9 +220,10 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
         instructions=(
             "Real-time Alpaca market data: news stream + v2 stock stream "
             "(trades/quotes/bars/halts) with bounded read-only MCP tools. "
-            "Prefer the delta-cursor tools (get_news_since, get_alerts_since, "
-            "get_bars_since) for polling loops. One Alpaca WS per endpoint per "
-            "container; no trading endpoints."
+            "Call get_started once for orientation, then poll_market once "
+            "per loop tick (combined news/alerts/bars deltas + snapshot + "
+            "loop context). One Alpaca WS per endpoint per container; no "
+            "trading endpoints."
         ),
         json_response=True,
         stateless_http=True,
@@ -201,6 +233,7 @@ def build_mcp(*, mcp_path: str = "/mcp") -> FastMCP:
     resources_mod.register(mcp)
     market_tools_mod.register(mcp)
     market_tools_mod.register_resources(mcp)
+    poll_tools_mod.register(mcp)
     return mcp
 
 

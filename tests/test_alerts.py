@@ -85,11 +85,29 @@ def test_breaking_keyword_alert():
 
 
 def test_high_latency_alert():
+    """Latency is computed from the article's own timestamps (receipt minus
+    newest of created/updated), not the stored latency_ms — which is frozen
+    at first ingest and measures article age, not pipeline delay."""
     eng = AlertEngine(high_latency_alert_ms=5000)
-    a = _make_article(latency_ms=8000)
+    a = _make_article().model_copy(update={"last_seen_at": "2026-04-28T00:00:09Z"})
     out = eng.evaluate_article(a, interest_symbols=set())
     cats = {al.category for al in out}
     assert "high_latency" in cats
+
+
+def test_no_high_latency_for_updated_old_article():
+    """An UPDATE to an old article arrives promptly: created_at is old but
+    updated_at is fresh — the frozen latency_ms must not re-flag it."""
+    eng = AlertEngine(high_latency_alert_ms=5000)
+    a = _make_article(latency_ms=86_400_000).model_copy(
+        update={
+            "created_at": "2026-04-01T00:00:00Z",
+            "updated_at": "2026-04-28T00:00:00Z",
+            "last_seen_at": "2026-04-28T00:00:01Z",
+        }
+    )
+    out = eng.evaluate_article(a, interest_symbols=set())
+    assert not any(al.category == "high_latency" for al in out)
 
 
 def test_high_latency_alert_suppressed_for_backfill():
@@ -191,12 +209,34 @@ def test_keywords_file_merge(tmp_path):
         interest_symbols=set(),
     )
     assert any(a.category == "mna_keyword" for a in alerts)
-    # Unknown group maps to breaking_keyword.
+    # Custom groups get their own category (>= medium severity), not the
+    # low-signal breaking_keyword bucket.
     alerts = engine.evaluate_article(
         _mk_article(id=3, headline="Quantum widget shipped"),
         interest_symbols=set(),
     )
-    assert any(a.category == "breaking_keyword" for a in alerts)
+    custom = [a for a in alerts if a.category == "custom_keyword"]
+    assert len(custom) == 1
+    assert custom[0].severity in ("medium", "high", "critical")
+    assert "quantum widget" in custom[0].reason
+
+
+def test_keywords_file_critical_phrase_alone_matches(tmp_path):
+    """A critical_phrases entry not duplicated in phrases must still match —
+    it previously only escalated severity AFTER a phrase match, making it a
+    silent no-op on its own."""
+    kw = tmp_path / "kw.json"
+    kw.write_text(_json.dumps({
+        "halt_risk": {"critical_phrases": ["trading suspended by sec"]},
+    }))
+    engine = _Engine(keywords_file=str(kw))
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Trading suspended by SEC pending inquiry"),
+        interest_symbols=set(),
+    )
+    halt = [a for a in alerts if a.category == "halt_risk_keyword"]
+    assert len(halt) == 1
+    assert halt[0].severity == "critical"
 
 
 def test_keywords_file_bad_json_falls_back(tmp_path):
@@ -270,9 +310,10 @@ def test_deduped_alerts_do_not_consume_rate_limit_quota():
     assert not any(a.category == "analyst_keyword" for a in after)
 
 
-def test_rate_limit_is_per_symbol_not_per_symbol_set():
-    """Co-mentions must not route around a symbol's hourly cap: ['AAPL'] and
-    ['AAPL', 'MSFT'] check and charge the same AAPL bucket."""
+def test_rate_limit_is_per_symbol_with_partial_admission():
+    """A hot symbol's exhausted bucket must not starve quiet co-mentioned
+    symbols: the co-mention alert emits (full symbol list) but charges ONLY
+    the under-quota symbols — and the hot symbol's own bucket stays capped."""
     engine = _Engine(rate_limit_per_symbol_hour=1)
     # Fill AAPL's analyst bucket via a single-symbol alert.
     single = [
@@ -283,7 +324,14 @@ def test_rate_limit_is_per_symbol_not_per_symbol_set():
     ]
     assert len(single) == 1
     engine.count_emission(single[0])
-    # A co-mention including AAPL is suppressed by AAPL's full bucket.
+    # A single-AAPL follow-up is suppressed by the full bucket.
+    solo = engine.evaluate_article(
+        _mk_article(id=5, headline="Analyst upgrade solo"), interest_symbols=set()
+    )
+    assert not any(a.category == "analyst_keyword" for a in solo)
+    assert engine.suppressed_alerts >= 1
+    # A co-mention including AAPL still emits for MSFT's sake, carrying the
+    # full symbol list...
     co = [
         a for a in engine.evaluate_article(
             _mk_article(id=2, headline="Analyst upgrade again", symbols=("AAPL", "MSFT")),
@@ -291,17 +339,40 @@ def test_rate_limit_is_per_symbol_not_per_symbol_set():
         )
         if a.category == "analyst_keyword"
     ]
-    assert co == []
-    assert engine.suppressed_alerts >= 1
+    assert len(co) == 1
+    assert co[0].symbols == ["AAPL", "MSFT"]
+    engine.count_emission(co[0])
+    # ...but charged only MSFT: its bucket is now full while AAPL's was not
+    # double-charged (still exactly at its cap).
+    msft = engine.evaluate_article(
+        _mk_article(id=3, headline="Analyst upgrade msft only", symbols=("MSFT",)),
+        interest_symbols=set(),
+    )
+    assert not any(a.category == "analyst_keyword" for a in msft)
     # An unrelated symbol's bucket is unaffected.
     other = [
         a for a in engine.evaluate_article(
-            _mk_article(id=3, headline="Analyst upgrade elsewhere", symbols=("NVDA",)),
+            _mk_article(id=4, headline="Analyst upgrade elsewhere", symbols=("NVDA",)),
             interest_symbols=set(),
         )
         if a.category == "analyst_keyword"
     ]
     assert len(other) == 1
+
+
+def test_keyword_alerts_carry_full_symbol_list():
+    """Interest hits bump severity but must not shrink the alert's symbol
+    attribution — a bankruptcy tagged [XYZ, SPY] is about XYZ too."""
+    engine = _Engine()
+    alerts = engine.evaluate_article(
+        _mk_article(headline="Analyst upgrade", symbols=("XYZ", "SPY")),
+        interest_symbols={"SPY"},
+    )
+    analyst = [a for a in alerts if a.category == "analyst_keyword"]
+    assert analyst[0].symbols == ["SPY", "XYZ"]
+    assert analyst[0].severity == "high"  # interest bump intact
+    held = [a for a in alerts if a.category == "held_or_interested_symbol"]
+    assert held[0].symbols == ["SPY"]  # interest-only tagging is the point here
 
 
 def test_interest_alerts_respect_rate_limit():

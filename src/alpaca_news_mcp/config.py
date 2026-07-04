@@ -38,7 +38,13 @@ def _get_bool(key: str, default: bool) -> bool:
     raw = os.getenv(key)
     if raw is None or raw == "":
         return default
-    return raw.strip().lower() in ("1", "true", "yes", "on", "y", "t")
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes", "on", "y", "t"):
+        return True
+    if val in ("0", "false", "no", "off", "n", "f"):
+        return False
+    # A typo like ENABLE_STOCK_STREAM=ture must not silently mean False.
+    raise RuntimeError(f"Invalid boolean for {key}: {raw!r}")
 
 
 def _get_csv(key: str, default: str = "") -> list[str]:
@@ -48,6 +54,9 @@ def _get_csv(key: str, default: str = "") -> list[str]:
 
 VALID_SUBSCRIPTION_MODES: Final = ("wildcard", "fallback")
 VALID_STOCK_CODECS: Final = ("msgpack", "json")
+# Feed names Alpaca accepts both as the v2 stream path segment and as the
+# REST `feed` query param ("test" is the credential-free smoke-test stream).
+VALID_STOCK_FEEDS: Final = ("sip", "iex", "delayed_sip", "test")
 # Canonical Alpaca v2 stock-stream channel names (subscription message keys).
 VALID_STOCK_CHANNELS: Final = (
     "trades",
@@ -62,7 +71,16 @@ VALID_STOCK_CHANNELS: Final = (
 
 def _get_channels(key: str, default: str) -> list[str]:
     """Case-insensitive channel list normalized to canonical channel names."""
-    raw = os.getenv(key, default) or default
+    raw = os.getenv(key)
+    if raw is None:
+        raw = default
+    elif not raw.strip():
+        # Explicitly-set empty previously fell back to ALL channels — the
+        # exact opposite of what the operator asked for.
+        raise RuntimeError(
+            f"{key} is set but empty; unset it for the default "
+            f"({default}) or list channels explicitly"
+        )
     canonical = {c.lower(): c for c in VALID_STOCK_CHANNELS}
     out: list[str] = []
     for token in raw.split(","):
@@ -135,7 +153,17 @@ class Config:
     market_storage_path: str
     stock_tick_retention_minutes: int
     stock_bar_retention_days: int
+    status_retention_days: int
     market_retention_interval_seconds: int
+    gap_fill_max_lookback_minutes: int
+    max_watchlist_symbols: int
+    stock_status_wildcard: bool
+    watchlist_add_backfill_minutes: int
+
+    # Derived (server-computed) alerts; 0 disables each trigger.
+    price_move_alert_pct: float
+    price_move_window_minutes: int
+    volume_spike_ratio: float
 
     # REST market context
     alpaca_trading_base_url: str
@@ -167,6 +195,16 @@ class Config:
             raise RuntimeError(
                 f"Invalid STOCK_STREAM_CODEC={stock_codec!r}; must be one of {VALID_STOCK_CODECS}"
             )
+        stock_feed = _get_str("ALPACA_STOCK_FEED", "sip").lower()
+        if stock_feed not in VALID_STOCK_FEEDS:
+            # The feed is both the stream URL path segment and the REST
+            # `feed` param — a typo would poison snapshots and gap-fill too.
+            raise RuntimeError(
+                f"Invalid ALPACA_STOCK_FEED={stock_feed!r}; must be one of {VALID_STOCK_FEEDS}"
+            )
+        # A zero/negative floor would allow a zero-backoff reconnect loop.
+        reconnect_min = max(1, _get_int("RECONNECT_MIN_SECONDS", 5))
+        reconnect_max = max(reconnect_min, _get_int("RECONNECT_MAX_SECONDS", 120))
         return cls(
             alpaca_api_key=_get_str("ALPACA_API_KEY", required=True),
             alpaca_secret_key=_get_str("ALPACA_SECRET_KEY", required=True),
@@ -195,8 +233,8 @@ class Config:
             event_retention_days=_get_int("EVENT_RETENTION_DAYS", 14),
             raw_event_retention_days=_get_int("RAW_EVENT_RETENTION_DAYS", 7),
             retention_interval_seconds=_get_int("RETENTION_INTERVAL_SECONDS", 3600),
-            reconnect_min_seconds=_get_int("RECONNECT_MIN_SECONDS", 5),
-            reconnect_max_seconds=_get_int("RECONNECT_MAX_SECONDS", 120),
+            reconnect_min_seconds=reconnect_min,
+            reconnect_max_seconds=reconnect_max,
             connection_limit_backoff_seconds=_get_int("CONNECTION_LIMIT_BACKOFF_SECONDS", 90),
             stable_connection_seconds=_get_int("STABLE_CONNECTION_SECONDS", 60),
             news_idle_reconnect_seconds=_get_int("NEWS_IDLE_RECONNECT_SECONDS", 0),
@@ -207,7 +245,7 @@ class Config:
             queue_backpressure_seconds=_get_float("QUEUE_BACKPRESSURE_SECONDS", 2.0),
             enable_manual_rest_backfill=_get_bool("ENABLE_MANUAL_REST_BACKFILL", True),
             enable_stock_stream=_get_bool("ENABLE_STOCK_STREAM", True),
-            alpaca_stock_feed=_get_str("ALPACA_STOCK_FEED", "sip").lower(),
+            alpaca_stock_feed=stock_feed,
             alpaca_stock_stream_url=_get_str("ALPACA_STOCK_STREAM_URL", ""),
             stock_stream_codec=stock_codec,
             stock_watchlist_symbols=_get_csv(
@@ -224,9 +262,25 @@ class Config:
             market_storage_path=_get_str("MARKET_STORAGE_PATH", "/data/alpaca_market.sqlite"),
             stock_tick_retention_minutes=_get_int("STOCK_TICK_RETENTION_MINUTES", 240),
             stock_bar_retention_days=_get_int("STOCK_BAR_RETENTION_DAYS", 30),
+            status_retention_days=_get_int("STATUS_RETENTION_DAYS", 30),
             market_retention_interval_seconds=_get_int(
                 "MARKET_RETENTION_INTERVAL_SECONDS", 900
             ),
+            gap_fill_max_lookback_minutes=_get_int(
+                "GAP_FILL_MAX_LOOKBACK_MINUTES", 1440
+            ),
+            # Alpaca's paid plan has no stream symbol cap — this bound is
+            # local (DB volume / snapshot memory). Hard ceiling 500.
+            max_watchlist_symbols=min(
+                500, max(1, _get_int("MAX_WATCHLIST_SYMBOLS", 100))
+            ),
+            stock_status_wildcard=_get_bool("STOCK_STATUS_WILDCARD", True),
+            watchlist_add_backfill_minutes=_get_int(
+                "WATCHLIST_ADD_BACKFILL_MINUTES", 240
+            ),
+            price_move_alert_pct=_get_float("PRICE_MOVE_ALERT_PCT", 3.0),
+            price_move_window_minutes=_get_int("PRICE_MOVE_WINDOW_MINUTES", 5),
+            volume_spike_ratio=_get_float("VOLUME_SPIKE_RATIO", 5.0),
             alpaca_trading_base_url=_get_str(
                 "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"
             ),

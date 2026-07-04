@@ -31,6 +31,10 @@ SubscriptionMode = Literal["wildcard", "fallback", "rest_only", "disconnected"]
 log = get_logger(__name__)
 
 SUBSCRIPTION_TIMEOUT_SECONDS = 10.0
+# Used when an entitlement rejection (409) forces the wildcard subscription
+# down to a symbol list and NEWS_FALLBACK_SYMBOLS is unset — subscribing to
+# nothing would silently starve the bot of news for the life of the process.
+DEFAULT_FALLBACK_SYMBOLS = ("AAPL", "MSFT", "NVDA")
 # Max articles persisted per batch commit. News volume is low; this only
 # matters during backfill floods and reconnect bursts.
 PERSIST_BATCH_MAX = 64
@@ -60,6 +64,9 @@ class NewsStreamWorker(BaseStreamWorker):
             gap_fill_callback=gap_fill_callback,
         )
         self._replay_task: asyncio.Task[None] | None = None
+        # One wildcard→fallback downgrade per session; a second 409 forces a
+        # reconnect instead of a resubscribe loop.
+        self._entitlement_downgraded = False
 
     async def start(self) -> None:
         await super().start()
@@ -124,6 +131,8 @@ class NewsStreamWorker(BaseStreamWorker):
             if item.get("code") == 402:
                 self._fatal_auth = True
                 return False
+            if item.get("code") == 409:
+                return await self._downgrade_after_entitlement_rejection(ws)
         elif t == "success":
             pass  # heartbeat-like
         else:
@@ -136,14 +145,48 @@ class NewsStreamWorker(BaseStreamWorker):
 
     # ---- subscription ----------------------------------------------------------
 
+    def _fallback_symbols(self) -> list[str]:
+        return self._config.news_fallback_symbols or list(DEFAULT_FALLBACK_SYMBOLS)
+
+    async def _downgrade_after_entitlement_rejection(self, ws: Any) -> bool:
+        """A 409 arriving AFTER the subscribe ack window (handle_item path).
+
+        Without this, a late entitlement rejection left the session
+        authenticated with no subscription at all — and with the news idle
+        watchdog off by default, no reconnect ever fired: zero news forever.
+        Returns False (forcing a reconnect) when a downgrade already happened
+        this session or the mode is not wildcard."""
+        if self._entitlement_downgraded:
+            return False
+        if self._state.subscription_state.mode != "wildcard":
+            return False
+        self._entitlement_downgraded = True
+        requested = {"news": self._fallback_symbols()}
+        log.info(
+            "late entitlement rejection; downgrading to symbol-list subscription"
+        )
+        try:
+            await ws.send(
+                orjson.dumps({"action": "subscribe", **requested}).decode("utf-8")
+            )
+        except Exception:
+            return False
+        self._state.subscription_state = SubscriptionState(
+            requested=requested, mode="fallback", last_ack_at=None
+        )
+        self._state.update_health(
+            requested_subscription=requested, subscription_mode="fallback"
+        )
+        return True
+
     async def _subscribe(self, ws: Any) -> None:
+        self._entitlement_downgraded = False
         mode_str = self._config.news_subscription_mode
         mode: SubscriptionMode = "wildcard" if mode_str == "wildcard" else "fallback"
         if mode == "wildcard":
             requested = {"news": ["*"]}
         else:
-            symbols = self._config.news_fallback_symbols or ["AAPL", "MSFT", "NVDA"]
-            requested = {"news": symbols}
+            requested = {"news": self._fallback_symbols()}
         await ws.send(
             orjson.dumps({"action": "subscribe", **requested}).decode("utf-8")
         )
@@ -196,14 +239,11 @@ class NewsStreamWorker(BaseStreamWorker):
                     # Only entitlement rejection (409) should downgrade
                     # wildcard → fallback. Transient/unrelated errors must
                     # not permanently narrow coverage for this session.
-                    if (
-                        item.get("code") == 409
-                        and mode == "wildcard"
-                        and self._config.news_fallback_symbols
-                    ):
+                    if item.get("code") == 409 and mode == "wildcard":
                         log.info("falling back to symbol-list subscription after entitlement rejection")
+                        self._entitlement_downgraded = True
                         mode = "fallback"
-                        requested = {"news": self._config.news_fallback_symbols}
+                        requested = {"news": self._fallback_symbols()}
                         await ws.send(
                             orjson.dumps(
                                 {"action": "subscribe", **requested}
@@ -242,12 +282,31 @@ class NewsStreamWorker(BaseStreamWorker):
         except Exception as e:  # pragma: no cover - defensive
             log.exception("failed to record dropped article: %s", e)
 
+    async def recover_failed_batch(
+        self, batch: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """A batch whose persist failed twice is written as replayable
+        queue_overflow_drop raw events — the drop-replay loop re-ingests
+        them once the store recovers. Each record_raw_event is its own
+        short transaction, so it usually succeeds even when the batch
+        commit failed transiently."""
+        for kind, item in batch:
+            if kind != "n":
+                continue
+            await self._store.record_raw_event(
+                endpoint="news_ws",
+                message_type="queue_overflow_drop",
+                raw_json=orjson.dumps(item).decode("utf-8"),
+            )
+
     # ---- coverage-gap + drop replay ---------------------------------------------
 
     async def on_session_ended(self, *, authed: bool) -> None:
         # With REST backfill enabled the reconnect gap-fill recovers the
         # window. Without it the loss is permanent — make it visible.
         if not authed or self._config.enable_rest_backfill:
+            return
+        if self._alerts.stream_alert_deduped(self.stream_name, "coverage_gap"):
             return
         alert = self._alerts.coverage_gap_alert(
             stream=self.stream_name,
@@ -314,12 +373,17 @@ class NewsStreamWorker(BaseStreamWorker):
         )
 
         entitlement = code == 409
-        alert = self._alerts.stream_error_alert(code=code, message=msg, entitlement=entitlement)
-        inserted = await self._store.record_alert(
-            alert, raw_json=orjson.dumps(item).decode("utf-8")
-        )
-        if inserted:
-            self._state.record_alert(alert)
+        # A stuck condition (406 loop, persistent 409) re-enters this path
+        # every backoff cycle — cap the alert feed to one entry per window.
+        if not self._alerts.stream_alert_deduped(self.stream_name, code):
+            alert = self._alerts.stream_error_alert(
+                code=code, message=msg, entitlement=entitlement
+            )
+            inserted = await self._store.record_alert(
+                alert, raw_json=orjson.dumps(item).decode("utf-8")
+            )
+            if inserted:
+                self._state.record_alert(alert)
 
         if code == 402:
             self._state.update_health(authenticated=False, last_error=f"402 {msg}")
@@ -329,8 +393,13 @@ class NewsStreamWorker(BaseStreamWorker):
                 connection_limit_blocked=True,
                 last_error=f"406 {msg}",
             )
-            await asyncio.sleep(self._config.connection_limit_backoff_seconds)
-            self._state.update_health(connection_limit_blocked=False)
+            # No in-handler sleep: blocking here stalls the whole worker
+            # task. _run consumes the deadline in its wait computation and
+            # clears connection_limit_blocked once it passes.
+            self._backoff_until = (
+                asyncio.get_event_loop().time()
+                + self._config.connection_limit_backoff_seconds
+            )
         elif code == 409:
             self._state.update_health(
                 entitlement_error=True,
@@ -373,7 +442,9 @@ class NewsStreamWorker(BaseStreamWorker):
             async with self._store.batch_writer() as writer:
                 for normalized in normalized_items:
                     result = await writer.upsert_article(normalized, source_kind="ws")
-                    pending_articles.append((result.article, result.was_new))
+                    pending_articles.append(
+                        (result.article, result.was_new, result.version_inserted)
+                    )
                     if result.was_new or result.version_inserted:
                         for alert in self._alerts.evaluate_article(
                             result.article, interest_symbols=interest
@@ -399,10 +470,24 @@ class NewsStreamWorker(BaseStreamWorker):
         # past articles that never reached SQLite — permanently skipping them
         # on the next gap-fill. Alert quota/state likewise.
         self._alerts.commit_pending()
-        for article, was_new in pending_articles:
+        for article, was_new, _ in pending_articles:
             self._state.record_article(article, was_new=was_new)
         for alert in pending_alerts:
             self._state.record_alert(alert)
+        # Watched-story updates fire after the commit (their alerts use their
+        # own short transactions and must reference committed content).
+        watched = self._state.get_watched_articles()
+        if watched:
+            for article, was_new, version_inserted in pending_articles:
+                if was_new or not version_inserted or article.id not in watched:
+                    continue
+                alert = self._alerts.watched_story_alert(article)
+                try:
+                    inserted = await self._store.record_alert(alert, raw_json="{}")
+                    if inserted:
+                        self._state.record_alert(alert)
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("failed to record watched_story_update alert")
 
     @staticmethod
     def _normalize_payloads(

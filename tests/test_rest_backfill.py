@@ -233,7 +233,7 @@ async def test_backfill_distinguishes_new_updated_duplicate(wired):
         route.mock(return_value=httpx.Response(200, json=page_v2))
         third = await worker.manual(60)
 
-    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "failure": None}
+    assert first == {"ingested": 1, "new": 1, "updated": 0, "duplicate": 0, "failed": 0, "pages": 1, "truncated": False, "failure": None}
     assert second["ingested"] == 1 and second["updated"] == 1 and second["new"] == 0 and second["duplicate"] == 0
     assert third["ingested"] == 1 and third["duplicate"] == 1 and third["new"] == 0 and third["updated"] == 0
 
@@ -402,3 +402,86 @@ async def test_non_json_body_marks_run_incomplete(wired):
         )
         result = await worker.manual(30)
     assert result["failure"] == "non-JSON response body"
+
+
+@pytest.mark.asyncio
+async def test_history_fetch_scopes_symbols_and_caps_items(wired):
+    """fetch_news_history: symbol-scoped params, item budget stops
+    pagination as an intentional truncation (not a failure)."""
+    worker, store, _, _ = wired
+    seen_params = []
+
+    def responder(request):
+        seen_params.append(dict(request.url.params))
+        news = [
+            {"id": 9000 + i, "headline": f"old story {i}", "symbols": ["XBIO"],
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"}
+            for i in range(3)
+        ]
+        return httpx.Response(200, json={"news": news, "next_page_token": "more"})
+
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(side_effect=responder)
+        result = await worker.history(symbols=["xbio"], days=90, max_articles=2)
+
+    assert seen_params[0]["symbols"] == "XBIO"
+    # Newest-first: when the window holds more than max_articles, the cap
+    # must keep the recent catalysts, not the oldest articles in the window.
+    assert seen_params[0]["sort"] == "desc"
+    assert result["truncated"] is True
+    assert result["failure"] is None
+    assert result["new"] + result["updated"] + result["duplicate"] == 2
+    assert (await store.get_article(9000)) is not None
+
+
+@pytest.mark.asyncio
+async def test_history_fetch_never_emits_live_alerts(wired):
+    """AlertEngine stamps created_at=now, so a year-old M&A/bankruptcy
+    headline pulled for research must not land in the live alert feed as
+    a fresh event. Live backfills (manual/gap-fill) still alert."""
+    worker, store, _, _ = wired
+    article = {
+        "id": 9500, "headline": "MegaCorp acquires TinyCo in $1B deal",
+        "symbols": ["MEGA"],
+        "created_at": "2025-01-01T00:00:00Z", "updated_at": "2025-01-01T00:00:00Z",
+    }
+
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(
+            return_value=httpx.Response(
+                200, json={"news": [article], "next_page_token": None}
+            )
+        )
+        result = await worker.history(symbols=["MEGA"], days=365, max_articles=10)
+    assert result["new"] == 1
+    assert await store.get_alerts(minutes=10, limit=50) == []
+
+    # Control: the same style of article through a LIVE run does alert.
+    live = {**article, "id": 9501, "headline": "OtherCorp acquires SomeCo"}
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(
+            return_value=httpx.Response(
+                200, json={"news": [live], "next_page_token": None}
+            )
+        )
+        await worker.manual(30)
+    alerts = await store.get_alerts(minutes=10, limit=50)
+    assert len(alerts) == 1 and alerts[0].category == "mna_keyword"
+
+
+@pytest.mark.asyncio
+async def test_watermark_runs_still_page_ascending(wired):
+    """startup/gap-fill/manual walk forward from a start watermark; only the
+    capped history fetch pages descending."""
+    worker, _store, _state, _ = wired
+    seen_params = []
+
+    def responder(request):
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"news": [], "next_page_token": None})
+
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(side_effect=responder)
+        await worker.manual(30)
+
+    assert seen_params[0]["sort"] == "asc"

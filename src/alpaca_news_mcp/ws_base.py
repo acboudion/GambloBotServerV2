@@ -81,10 +81,18 @@ class BaseStreamWorker:
         self._main_task: asyncio.Task[None] | None = None
         self._persister_task: asyncio.Task[None] | None = None
         self._fatal_auth = False
+        # A 402 from the header-auth probe, held back until message auth has
+        # also failed — alerting it immediately would record a false critical
+        # auth failure on sessions the fallback then authenticates.
+        self._deferred_auth_error: dict[str, Any] | None = None
+        # Monotonic deadline set on 406 connection-limit errors; consumed by
+        # _run's wait computation instead of sleeping inside handle_error.
+        self._backoff_until: float = 0.0
         self._authed_this_session = False
         self._last_stale_alert: float | None = None
         self._sessions_authed = 0
         self._gap_fill_task: asyncio.Task[None] | None = None
+        self._last_queue_warning: float = 0.0
         # Live socket while connected+authenticated; lets subclasses send
         # subscription deltas at runtime.
         self._ws: Any | None = None
@@ -157,6 +165,12 @@ class BaseStreamWorker:
 
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
         """Called when backpressure is exhausted and an item is dropped."""
+
+    async def recover_failed_batch(
+        self, batch: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Salvage what can be salvaged from a batch whose persist failed
+        twice (subclass hook — e.g. write replayable drop records)."""
 
     async def on_session_ended(self, *, authed: bool) -> None:
         """Called after every connection ends, before the reconnect backoff."""
@@ -298,6 +312,11 @@ class BaseStreamWorker:
                 base_max = self._config.reconnect_max_seconds
                 wait = min(base_max, base_min * (2 ** min(attempt - 1, 6)))
                 wait = wait * (0.7 + 0.6 * random.random())
+                # A 406 connection-limit error sets a backoff deadline —
+                # honor whichever wait is longer.
+                remaining_backoff = self._backoff_until - loop.time()
+                if remaining_backoff > wait:
+                    wait = remaining_backoff
                 log.info(
                     "%s reconnecting in %.1fs (attempt=%d)", self.stream_name, wait, attempt
                 )
@@ -305,6 +324,11 @@ class BaseStreamWorker:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=wait)
             except TimeoutError:
                 pass
+            if self._backoff_until and loop.time() >= self._backoff_until:
+                self._backoff_until = 0.0
+                self._state.update_health(
+                    self.stream_name, connection_limit_blocked=False
+                )
 
             self._state.update_health(
                 self.stream_name,
@@ -326,18 +350,34 @@ class BaseStreamWorker:
             max_size=2**22,
         ) as ws:
             self._state.update_health(self.stream_name, connected=True, last_error=None)
+            self._deferred_auth_error = None
             try:
                 authed = await self._await_auth(ws)
                 if not authed:
+                    if asyncio.get_event_loop().time() < self._backoff_until:
+                        # A 406 just landed — this connection occupies the
+                        # very slot that is exhausted; a message-auth retry
+                        # on it is doomed and only prolongs the conflict.
+                        return
                     # Fall back to message auth.
                     authed = await self._auth_via_message(ws)
                 if not authed:
+                    deferred = self._deferred_auth_error
+                    self._deferred_auth_error = None
+                    if deferred is not None:
+                        # The header-auth 402 turned out to be real — both
+                        # auth paths failed, so alert it now.
+                        await self.handle_error(deferred)
                     self._state.update_health(
                         self.stream_name, authenticated=False, last_error="auth failed"
                     )
                     return
 
+                # The header-auth 402 was the already-authenticated quirk;
+                # message auth recovered the session, so no alert.
+                self._deferred_auth_error = None
                 self._authed_this_session = True
+                self._fatal_auth = False
                 self._state.update_health(
                     self.stream_name, authenticated=True, auth_failed=False
                 )
@@ -399,10 +439,13 @@ class BaseStreamWorker:
                 elif t == "success" and msg == "authenticated":
                     return True
                 elif t == "error":
-                    await self.handle_error(item)
                     if code == 402:
-                        # Already-authenticated quirks — message auth attempt may still work
+                        # Already-authenticated quirk — message auth may still
+                        # succeed. Defer the alert: _connect_and_run delivers
+                        # it only if the fallback also fails.
+                        self._deferred_auth_error = item
                         return False
+                    await self.handle_error(item)
                     if code in (406,):
                         return False
             if connected and asyncio.get_event_loop().time() > deadline - 1:
@@ -494,7 +537,12 @@ class BaseStreamWorker:
 
             depth = self._queue.qsize()
             if depth >= self.queue_warning_depth():
-                log.warning("%s queue depth high: %d", self.stream_name, depth)
+                # Rate-limited: logging once per received frame while the
+                # queue stays deep amplifies the overload it reports.
+                now = asyncio.get_event_loop().time()
+                if now - self._last_queue_warning >= 30.0:
+                    self._last_queue_warning = now
+                    log.warning("%s queue depth high: %d", self.stream_name, depth)
 
     def _touch_last_message(self) -> None:
         self._state.update_health(
@@ -617,7 +665,47 @@ class BaseStreamWorker:
             try:
                 await self.persist_batch(batch)
             except Exception as e:
-                log.exception("%s persister error: %s", self.stream_name, e)
+                # A dropped batch is silent data loss the recovery watermark
+                # then papers over (later successful batches advance it past
+                # the hole). Retry once — most failures are transient
+                # (SQLITE_BUSY, I/O hiccup) — then hand the batch to the
+                # subclass recovery path and make the loss visible.
+                log.warning(
+                    "%s persister error; retrying batch once: %s",
+                    self.stream_name,
+                    e,
+                )
+                try:
+                    await self.persist_batch(batch)
+                except Exception as e2:
+                    log.exception(
+                        "%s persister retry failed; recovering %d item(s): %s",
+                        self.stream_name,
+                        len(batch),
+                        e2,
+                    )
+                    await self._handle_persist_failure(batch, e2)
             finally:
                 for _ in batch:
                     self._queue.task_done()
+
+    async def _handle_persist_failure(
+        self, batch: list[tuple[str, dict[str, Any]]], error: Exception
+    ) -> None:
+        failures = self._state.snapshot_health(self.stream_name).persist_failures + 1
+        self._state.update_health(self.stream_name, persist_failures=failures)
+        try:
+            await self.recover_failed_batch(batch)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("%s failed-batch recovery also failed", self.stream_name)
+        if self._alerts.stream_alert_deduped(self.stream_name, "persist_failure"):
+            return
+        alert = self._alerts.persist_failure_alert(
+            stream=self.stream_name, batch_size=len(batch), error=str(error)
+        )
+        try:
+            inserted = await self._store.record_alert(alert, raw_json="{}")
+            if inserted:
+                self._state.record_alert(alert)
+        except Exception:  # pragma: no cover - the store may still be down
+            log.exception("failed to record persist_failure alert")

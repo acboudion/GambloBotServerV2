@@ -122,8 +122,41 @@ class RestBackfillWorker:
         start = datetime.now(UTC) - timedelta(minutes=minutes)
         return await self._run(start_iso=start.isoformat(), reason="manual")
 
+    async def history(
+        self, *, symbols: list[str], days: int, max_articles: int
+    ) -> dict[str, Any]:
+        """Symbol-scoped deep fetch (bot-triggered, e.g. evaluating an
+        unfamiliar ticker). Shares _run_lock with startup/gap-fill runs;
+        bounded to max_articles (<= ~10 pages), so it holds the lock for
+        seconds, not minutes.
+
+        Pages newest-first: when the window holds more than max_articles,
+        the cap must keep the recent catalysts the bot is evaluating, not
+        the oldest articles in the window.
+
+        Ingests without emitting alerts: AlertEngine stamps created_at=now,
+        so a year-old bankruptcy headline pulled for research would surface
+        in get_alerts_since/poll_market as a fresh critical alert."""
+        start = datetime.now(UTC) - timedelta(days=days)
+        return await self._run(
+            start_iso=start.isoformat(),
+            reason="history",
+            symbols=symbols,
+            max_items=max_articles,
+            sort="desc",
+            emit_alerts=False,
+        )
+
     async def _run(
-        self, *, start_iso: str, reason: str, raise_on_failure: bool = False
+        self,
+        *,
+        start_iso: str,
+        reason: str,
+        raise_on_failure: bool = False,
+        symbols: list[str] | None = None,
+        max_items: int | None = None,
+        sort: str = "asc",
+        emit_alerts: bool = True,
     ) -> dict[str, Any]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
@@ -139,11 +172,16 @@ class RestBackfillWorker:
         failure: str | None = None
         async with self._run_lock:
             client = await self._ensure_client()
+            # asc for watermark-driven runs (startup/gap-fill walk forward
+            # from a start time); desc for capped history fetches, where the
+            # item budget must keep the newest articles.
             params: dict[str, Any] = {
                 "start": start_iso,
-                "sort": "asc",
+                "sort": sort,
                 "limit": 50,
             }
+            if symbols:
+                params["symbols"] = ",".join(sorted({s.strip().upper() for s in symbols}))
             if self._config.rest_include_content:
                 params["include_content"] = "true"
             if self._config.rest_exclude_contentless:
@@ -156,6 +194,7 @@ class RestBackfillWorker:
             max_pages = MAX_BACKFILL_PAGES
             max_429_retries = MAX_429_RETRIES
             retries_429 = 0
+            truncated = False
 
             while pages < max_pages:
                 if page_token:
@@ -220,10 +259,22 @@ class RestBackfillWorker:
                     break
                 news = data.get("news") or []
                 for item in news:
-                    counts[await self._ingest_one(item)] += 1
+                    counts[await self._ingest_one(item, emit_alerts=emit_alerts)] += 1
+                    if (
+                        max_items is not None
+                        and counts["new"] + counts["updated"] + counts["duplicate"]
+                        >= max_items
+                    ):
+                        truncated = True
+                        break
                 pages += 1
                 page_token = data.get("next_page_token") or None
                 backoff = max(1.0, backoff / 2)
+                if truncated:
+                    # Bounded fetch (history tool) reached its item budget —
+                    # an intentional stop, not an incomplete window.
+                    page_token = None
+                    break
                 if not page_token:
                     break
 
@@ -260,12 +311,15 @@ class RestBackfillWorker:
                 "duplicate": counts["duplicate"],
                 "failed": counts["failed"],
                 "pages": pages,
+                "truncated": truncated,
                 # Non-raising callers (startup, manual tool) must still be able
                 # to tell an incomplete run from a clean one.
                 "failure": failure,
             }
 
-    async def _ingest_one(self, payload: dict[str, Any]) -> IngestStatus:
+    async def _ingest_one(
+        self, payload: dict[str, Any], *, emit_alerts: bool = True
+    ) -> IngestStatus:
         try:
             normalized = normalize_news_message(payload)
         except NormalizationError as e:
@@ -281,7 +335,10 @@ class RestBackfillWorker:
         # high-latency alerts on REST ingest: `latency_ms` is computed against
         # `created_at`, so historical backfill items would always trip the
         # threshold and drown out genuine real-time pipeline alerts.
-        if result.was_new or result.version_inserted:
+        # emit_alerts=False (history fetches) ingests/search-indexes only:
+        # alerts carry created_at=now, so old research articles would land
+        # in the live alert feed as fresh events.
+        if emit_alerts and (result.was_new or result.version_inserted):
             interest = self._state.get_interest_symbols()
             for alert in self._alerts.evaluate_article(
                 result.article,
@@ -296,6 +353,15 @@ class RestBackfillWorker:
                 if inserted:
                     self._alerts.count_emission(alert)
                     self._state.record_alert(alert)
+            if (
+                result.version_inserted
+                and not result.was_new
+                and result.article.id in self._state.get_watched_articles()
+            ):
+                watch_alert = self._alerts.watched_story_alert(result.article)
+                inserted = await self._store.record_alert(watch_alert, raw_json="{}")
+                if inserted:
+                    self._state.record_alert(watch_alert)
         if result.was_new:
             return "new"
         if result.version_inserted:

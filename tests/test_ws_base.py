@@ -329,3 +329,163 @@ async def test_auth_alert_every_n_zero_does_not_crash_retry_loop(wired):
         await worker.stop()
         server.close()
         await server.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_persister_retries_failed_batch_once(wired):
+    """A transient persist failure must not lose the batch: one retry."""
+    cfg, store, state, alerts = wired
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+
+    calls = {"n": 0}
+    real_persist = worker.persist_batch
+
+    async def flaky(batch):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        await real_persist(batch)
+
+    worker.persist_batch = flaky  # type: ignore[method-assign]
+    task = asyncio.create_task(worker._persister_loop())
+    try:
+        await worker._queue.put(("n", {"T": "n", "id": 7101, "headline": "retry me"}))
+        assert await _wait_for(lambda: calls["n"] >= 2)
+        await worker._queue.join()
+        article = await store.get_article(7101)
+        assert article is not None
+        assert state.snapshot_health("news").persist_failures == 0
+    finally:
+        task.cancel()
+        NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_persister_double_failure_routes_to_replayable_recovery(wired):
+    """Two persist failures: batch becomes replayable raw events, the
+    persist_failures counter increments, and a critical alert is recorded
+    (once per dedup window)."""
+    cfg, store, state, alerts = wired
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+
+    async def always_fail(batch):
+        raise RuntimeError("disk on fire")
+
+    worker.persist_batch = always_fail  # type: ignore[method-assign]
+    task = asyncio.create_task(worker._persister_loop())
+    try:
+        await worker._queue.put(("n", {"T": "n", "id": 7201, "headline": "lost?"}))
+        await worker._queue.put(("n", {"T": "n", "id": 7202, "headline": "lost too?"}))
+        assert await _wait_for(
+            lambda: state.snapshot_health("news").persist_failures >= 1
+        )
+        await worker._queue.join()
+
+        # Batch payloads landed as replayable drop events.
+        events = await store.unreplayed_dropped_events(limit=10)
+        replay_ids = {e["payload"]["id"] for e in events if e["payload"]}
+        assert {7201, 7202} <= replay_ids
+
+        # Exactly one persist_failure alert despite repeated failures
+        # (stream_alert_deduped window).
+        rows, _, _ = await store.alerts_since(cursor=0, limit=50)
+        pf = [a for a in rows if a["category"] == "persist_failure"]
+        assert len(pf) == 1
+        assert pf[0]["severity"] == "critical"
+
+        # The replay loop can now re-ingest them with the real persist path.
+        worker.persist_batch = NewsStreamWorker.persist_batch.__get__(worker)  # type: ignore[method-assign]
+        replayed = await worker._replay_dropped_once()
+        assert replayed >= 2
+        assert await store.get_article(7201) is not None
+    finally:
+        task.cancel()
+        NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_stream_error_alerts_are_deduped(wired):
+    """A stuck 406 loop must not flood the alert feed: one stream_error
+    alert per (stream, code) dedup window."""
+    cfg, store, state, alerts = wired
+    cfg = replace(cfg, connection_limit_backoff_seconds=0)
+    worker = NewsStreamWorker(cfg, store, state, alerts)
+    try:
+        for _ in range(3):
+            await worker.handle_error({"T": "error", "code": 406, "msg": "limit"})
+        rows, _, _ = await store.alerts_since(cursor=0, limit=50)
+        errs = [a for a in rows if a["category"] == "stream_error"]
+        assert len(errs) == 1
+    finally:
+        NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_402_quirk_then_message_auth_success_clears_fatal_auth(wired):
+    """A 402 error during the header-auth window followed by successful
+    message auth must not poison the session: the next ordinary disconnect
+    takes the normal backoff, not the 900s auth-retry path with a false
+    critical alert."""
+    cfg, store, state, alerts = wired
+    sessions = {"n": 0}
+
+    async def handler(ws):
+        sessions["n"] += 1
+        await ws.send(orjson.dumps([{"T": "success", "msg": "connected"}]).decode())
+        if sessions["n"] == 1:
+            # Header-auth quirk: reject once, then accept message auth.
+            await ws.send(orjson.dumps(
+                [{"T": "error", "code": 402, "msg": "auth failed"}]
+            ).decode())
+            msg = orjson.loads(await ws.recv())
+            assert msg["action"] == "auth"
+            await ws.send(orjson.dumps(
+                [{"T": "success", "msg": "authenticated"}]
+            ).decode())
+            await ws.recv()  # subscribe
+            await ws.send(orjson.dumps(
+                [{"T": "subscription", "news": ["*"]}]
+            ).decode())
+            await asyncio.sleep(0.2)
+            return  # ordinary disconnect
+        await _handshake(ws)
+        await asyncio.sleep(1.0)
+
+    server, port = await _start_fake_ws(handler)
+    cfg2 = replace(cfg, alpaca_news_stream_url=f"ws://127.0.0.1:{port}/news")
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    try:
+        await worker.start()
+        # Session 2 must start on the ~1s normal cadence — the fatal-auth
+        # path would wait AUTH_RETRY_SECONDS (900s default).
+        assert await _wait_for(lambda: sessions["n"] >= 2, deadline_s=8.0)
+        assert state.snapshot_health().auth_failed is False
+        # The header-auth 402 is DEFERRED and dropped once message auth
+        # recovers: a session that actually authenticated must record no
+        # stream_error alert at all — not the critical auth-failing one,
+        # and not the immediate code-402 alert either.
+        stored = await store.get_alerts(minutes=5, categories=["stream_error"], limit=10)
+        assert stored == []
+    finally:
+        await worker.stop()
+        server.close()
+        await server.wait_closed()
+        NewsStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_406_sets_backoff_deadline_without_blocking(wired):
+    """handle_error(406) must return immediately and leave the backoff to
+    _run's wait computation — sleeping in the handler stalled the worker."""
+    cfg, store, state, alerts = wired
+    cfg2 = replace(cfg, connection_limit_backoff_seconds=30)
+    worker = NewsStreamWorker(cfg2, store, state, alerts)
+    try:
+        loop = asyncio.get_event_loop()
+        before = loop.time()
+        await worker.handle_error({"T": "error", "code": 406, "msg": "limit"})
+        assert loop.time() - before < 1.0  # no 30s sleep
+        assert state.snapshot_health().connection_limit_blocked is True
+        assert worker._backoff_until > before + 25
+    finally:
+        NewsStreamWorker.reset_singleton()

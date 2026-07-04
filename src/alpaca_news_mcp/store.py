@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from pydantic import ValidationError
 
 from .logging_utils import get_logger
 from .migrations import NEWS_MIGRATIONS, migrate
@@ -59,12 +60,53 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# stream_status row persisting the seq allocation high-water marks. Seeding
+# the allocators from MAX(seq) alone is not enough: retention can prune the
+# rows carrying MAX(seq), and a restart would then re-issue already-consumed
+# seq values — new rows landing at or below a poller's saved cursor would
+# never be delivered.
+SEQ_WATERMARKS_KEY = "seq_watermarks"
+
+
+async def open_read_connection(path: str) -> aiosqlite.Connection | None:
+    """Open a read-only companion connection (WAL snapshot isolation).
+
+    Tool reads must never share the writer's connection: on a shared
+    connection a SELECT issued while a batch transaction is open sees
+    uncommitted rows — phantom articles/alerts that vanish on rollback —
+    and queues behind long prunes. A separate mode=ro connection reads
+    the last committed WAL snapshot instead.
+
+    Returns None (callers fall back to the writer connection) for
+    :memory: databases — a second connection would see a different,
+    empty database — or if the read-only open fails for any reason.
+    """
+    if not path or path == ":memory:":
+        return None
+    try:
+        conn = await aiosqlite.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+    except Exception as e:
+        log.warning(
+            "read-only connection unavailable for %s (%s); reads share the writer",
+            path,
+            e,
+        )
+        return None
+
+
 class Store:
     def __init__(self, path: str) -> None:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
+        self._read_conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
         self._next_seq: int = 1
+        self._next_alert_seq: int = 1
+        # Set by the allocators; cleared when the watermarks row is written.
+        self._seq_dirty: bool = False
 
     @classmethod
     async def open(cls, path: str) -> Store:
@@ -79,6 +121,9 @@ class Store:
         return store
 
     async def close(self) -> None:
+        if self._read_conn is not None:
+            await self._read_conn.close()
+            self._read_conn = None
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
@@ -88,6 +133,11 @@ class Store:
         if self._conn is None:
             raise RuntimeError("Store is not open")
         return self._conn
+
+    @property
+    def rconn(self) -> aiosqlite.Connection:
+        """Read connection for tool queries; the writer when unavailable."""
+        return self._read_conn if self._read_conn is not None else self.conn
 
     async def init_schema(self) -> None:
         sql_text = resources.files("alpaca_news_mcp").joinpath("schema.sql").read_text(
@@ -100,13 +150,61 @@ class Store:
             cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM news_articles")
             row = await cur.fetchone()
             await cur.close()
-            self._next_seq = (int(row[0]) if row else 0) + 1
+            max_article_seq = int(row[0]) if row else 0
+            cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM alerts")
+            row = await cur.fetchone()
+            await cur.close()
+            max_alert_seq = int(row[0]) if row else 0
+            persisted = await self._read_status(self.conn, SEQ_WATERMARKS_KEY) or {}
+            self._next_seq = max(max_article_seq, int(persisted.get("news_seq", 0))) + 1
+            self._next_alert_seq = (
+                max(max_alert_seq, int(persisted.get("alert_seq", 0))) + 1
+            )
+        # After the schema exists and WAL mode is committed — mode=ro on a
+        # nonexistent file would fail.
+        self._read_conn = await open_read_connection(self.path)
 
     def _allocate_seq(self) -> int:
         """Next monotonic ingest sequence. Callers must hold the write lock."""
         seq = self._next_seq
         self._next_seq += 1
+        self._seq_dirty = True
         return seq
+
+    def _allocate_alert_seq(self) -> int:
+        """Next monotonic alert cursor. Callers must hold the write lock."""
+        seq = self._next_alert_seq
+        self._next_alert_seq += 1
+        self._seq_dirty = True
+        return seq
+
+    async def _flush_watermarks_locked(self) -> None:
+        """Persist the allocation high-water marks inside the open transaction.
+
+        Called at every commit point that may have allocated seqs, so any
+        committed row's seq is always covered by the committed watermark row.
+        A rollback discards both together, keeping them consistent — the
+        in-memory allocators stay advanced, which only leaves harmless gaps.
+        """
+        if not self._seq_dirty:
+            return
+        await self.conn.execute(
+            """INSERT INTO stream_status (key, value_json, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                             updated_at = excluded.updated_at""",
+            (
+                SEQ_WATERMARKS_KEY,
+                json.dumps(
+                    {
+                        "news_seq": self._next_seq - 1,
+                        "alert_seq": self._next_alert_seq - 1,
+                    }
+                ),
+                _utcnow_iso(),
+            ),
+        )
+        self._seq_dirty = False
 
     async def upsert_article(
         self,
@@ -117,6 +215,7 @@ class Store:
         """Insert or update an article with its own transaction."""
         async with self._write_lock:
             result = await self._upsert_article_locked(normalized, source_kind=source_kind)
+            await self._flush_watermarks_locked()
             await self.conn.commit()
         return result
 
@@ -136,6 +235,7 @@ class Store:
             # pending alert quota/state.
             try:
                 yield BatchWriter(self)
+                await self._flush_watermarks_locked()
                 await self.conn.commit()
             except BaseException:
                 await self.conn.rollback()
@@ -467,7 +567,7 @@ class Store:
         """Queue-overflow-dropped articles not yet replayed, oldest first.
         Each entry: {event_id, payload} where payload is the parsed article
         dict (None if the stored JSON is unparseable)."""
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT event_id, raw_json FROM raw_events "
             "WHERE message_type = 'queue_overflow_drop' AND replayed = 0 "
             "ORDER BY received_at ASC LIMIT ?",
@@ -503,6 +603,7 @@ class Store:
             inserted = await self._record_alert_locked(
                 alert, raw_json=raw_json, content_hash=content_hash
             )
+            await self._flush_watermarks_locked()
             await self.conn.commit()
             return inserted
 
@@ -525,13 +626,17 @@ class Store:
             if duplicate is not None:
                 return False
         try:
+            # Allocated after the dedup checks; an IntegrityError below leaves
+            # a gap in the sequence, which cursors tolerate (monotonic, not
+            # dense).
+            seq = self._allocate_alert_seq()
             await self.conn.execute(
                 """
                 INSERT INTO alerts (
                     alert_id, article_id, created_at, severity, category,
                     symbols_json, headline, reason, acknowledged, raw_json,
-                    content_hash, direction
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    content_hash, direction, seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     alert.alert_id,
@@ -545,6 +650,7 @@ class Store:
                     raw_json,
                     content_hash,
                     alert.direction,
+                    seq,
                 ),
             )
             return True
@@ -572,7 +678,13 @@ class Store:
             await self.conn.commit()
 
     async def get_status(self, key: str) -> dict[str, Any] | None:
-        cur = await self.conn.execute(
+        return await self._read_status(self.rconn, key)
+
+    @staticmethod
+    async def _read_status(
+        conn: aiosqlite.Connection, key: str
+    ) -> dict[str, Any] | None:
+        cur = await conn.execute(
             "SELECT value_json FROM stream_status WHERE key = ?", (key,)
         )
         row = await cur.fetchone()
@@ -585,7 +697,7 @@ class Store:
             return None
 
     async def get_article(self, article_id: int) -> NewsArticle | None:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT * FROM news_articles WHERE id = ?", (article_id,)
         )
         row = await cur.fetchone()
@@ -624,7 +736,7 @@ class Store:
             + " ORDER BY COALESCE(updated_at, created_at, first_seen_at) DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
@@ -692,7 +804,7 @@ class Store:
             + " ORDER BY f.rank LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
@@ -706,8 +818,20 @@ class Store:
         until: str | None,
         limit: int,
     ) -> list[NewsArticle]:
-        like = f"%{query.lower()}%"
-        clauses = ["(LOWER(headline) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(content_text) LIKE ?)"]
+        # Escape LIKE metacharacters so a query containing % or _ (price
+        # moves, tickers) matches literally instead of as wildcards.
+        escaped = (
+            query.lower()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        like = f"%{escaped}%"
+        clauses = [
+            "(LOWER(headline) LIKE ? ESCAPE '\\' "
+            "OR LOWER(summary) LIKE ? ESCAPE '\\' "
+            "OR LOWER(content_text) LIKE ? ESCAPE '\\')"
+        ]
         params: list[Any] = [like, like, like]
 
         if symbols:
@@ -732,10 +856,47 @@ class Store:
             + " ORDER BY COALESCE(updated_at, created_at, first_seen_at) DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
         return [self._row_to_article(r) for r in rows]
+
+    @property
+    def latest_article_cursor(self) -> int:
+        """Highest allocated article seq — 'pass this to receive only new
+        rows'. Uses the allocator (not table MAX) so it stays meaningful
+        after retention empties the table; future rows always allocate
+        above it."""
+        return self._next_seq - 1
+
+    @property
+    def latest_alert_cursor(self) -> int:
+        return self._next_alert_seq - 1
+
+    async def min_article_seq(self, symbols: list[str] | None = None) -> int:
+        """Oldest retained article seq, optionally under the same symbol
+        filter articles_since applies. Gap detection for a filtered feed
+        must use the filtered minimum: an unrelated symbol's older retained
+        article would otherwise mask pruned matching articles."""
+        sql = "SELECT COALESCE(MIN(seq), 0) FROM news_articles"
+        params: list[Any] = []
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            sql += (
+                " WHERE id IN (SELECT article_id FROM news_symbol_index "
+                f"WHERE symbol IN ({placeholders}))"
+            )
+            params.extend([s.upper() for s in symbols])
+        cur = await self.rconn.execute(sql, params)
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else 0
+
+    async def min_alert_seq(self) -> int:
+        cur = await self.rconn.execute("SELECT COALESCE(MIN(seq), 0) FROM alerts")
+        row = await cur.fetchone()
+        await cur.close()
+        return int(row[0]) if row else 0
 
     async def articles_since(
         self,
@@ -763,7 +924,7 @@ class Store:
             + " ORDER BY seq ASC LIMIT ?"
         )
         params.append(limit + 1)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = list(await cur.fetchall())
         await cur.close()
         has_more = len(rows) > limit
@@ -781,28 +942,38 @@ class Store:
         cursor: int,
         limit: int,
         severity: str | None = None,
+        severities: list[str] | None = None,
         categories: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
-        """Alerts with rowid > cursor in insert order (alerts are insert-only).
+        """Alerts with seq > cursor in insert order (alerts are insert-only).
+
+        Pages on the explicit monotonic seq (migration m5) rather than the
+        implicit rowid: SQLite reuses rowids once retention prunes the
+        max-rowid row, which would make later alerts land at or below a
+        poller's saved cursor and never be delivered.
 
         Returns (alert_dicts_with_cursor, next_cursor, has_more).
         """
-        clauses = ["rowid > ?"]
+        clauses = ["seq > ?"]
         params: list[Any] = [cursor]
         if severity:
             clauses.append("severity = ?")
             params.append(severity)
+        if severities:
+            placeholders = ",".join("?" * len(severities))
+            clauses.append(f"severity IN ({placeholders})")
+            params.extend(severities)
         if categories:
             placeholders = ",".join("?" * len(categories))
             clauses.append(f"category IN ({placeholders})")
             params.extend(categories)
         sql = (
-            "SELECT rowid AS cursor_id, * FROM alerts WHERE "
+            "SELECT seq AS cursor_id, * FROM alerts WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY rowid ASC LIMIT ?"
+            + " ORDER BY seq ASC LIMIT ?"
         )
         params.append(limit + 1)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = list(await cur.fetchall())
         await cur.close()
         has_more = len(rows) > limit
@@ -843,7 +1014,7 @@ class Store:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
         for sym in symbols:
             sym_u = sym.upper()
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 """
                 SELECT a.* FROM news_articles a
                 JOIN news_symbol_index s ON s.article_id = a.id
@@ -862,7 +1033,7 @@ class Store:
         self, article_id: int, limit: int | None = None
     ) -> list[NewsArticleVersion]:
         if limit is None:
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 "SELECT * FROM news_article_versions WHERE article_id = ? "
                 "ORDER BY received_at ASC",
                 (article_id,),
@@ -871,7 +1042,7 @@ class Store:
             # Pull the most recent `limit` rows at the SQL level so we don't
             # read or deserialize the full version history, then re-sort ASC
             # to keep the existing oldest-first response ordering.
-            cur = await self.conn.execute(
+            cur = await self.rconn.execute(
                 "SELECT * FROM ("
                 "  SELECT * FROM news_article_versions WHERE article_id = ? "
                 "  ORDER BY received_at DESC LIMIT ?"
@@ -895,7 +1066,7 @@ class Store:
         ]
 
     async def count_versions(self, article_id: int) -> int:
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT COUNT(*) FROM news_article_versions WHERE article_id = ?",
             (article_id,),
         )
@@ -934,28 +1105,41 @@ class Store:
             + " ORDER BY created_at DESC LIMIT ?"
         )
         params.append(limit)
-        cur = await self.conn.execute(sql, params)
+        cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
-        return [
-            Alert(
-                alert_id=r["alert_id"],
-                article_id=r["article_id"],
-                created_at=r["created_at"],
-                severity=r["severity"],
-                category=r["category"],
-                symbols=json.loads(r["symbols_json"] or "[]"),
-                headline=r["headline"],
-                reason=r["reason"],
-                acknowledged=bool(r["acknowledged"]),
-                direction=(r["direction"] if "direction" in r.keys() else None) or "neutral",
-            )
-            for r in rows
-        ]
+        out: list[Alert] = []
+        for r in rows:
+            try:
+                out.append(
+                    Alert(
+                        alert_id=r["alert_id"],
+                        article_id=r["article_id"],
+                        created_at=r["created_at"],
+                        severity=r["severity"],
+                        category=r["category"],
+                        symbols=json.loads(r["symbols_json"] or "[]"),
+                        headline=r["headline"],
+                        reason=r["reason"],
+                        acknowledged=bool(r["acknowledged"]),
+                        direction=(r["direction"] if "direction" in r.keys() else None)
+                        or "neutral",
+                    )
+                )
+            except ValidationError:
+                # Rows written by a newer build can carry categories this
+                # build's Literal doesn't know — skip them instead of failing
+                # the whole read after a downgrade.
+                log.warning(
+                    "skipping alert %s with unknown category %r",
+                    r["alert_id"],
+                    r["category"],
+                )
+        return out
 
     async def latency_stats(self, minutes: int) -> LatencyStats:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT latency_ms FROM news_articles "
             "WHERE first_seen_at >= ? AND latency_ms IS NOT NULL AND latency_ms >= 0",
             (since,),
@@ -993,7 +1177,7 @@ class Store:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
 
         async def _count(sql: str) -> int:
-            cur = await self.conn.execute(sql, (since,))
+            cur = await self.rconn.execute(sql, (since,))
             row = await cur.fetchone()
             await cur.close()
             return int(row["c"]) if row is not None else 0
@@ -1028,7 +1212,7 @@ class Store:
         self, *, minutes: int, limit: int = 100
     ) -> list[dict[str, Any]]:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             "SELECT event_id, received_at, endpoint, message_type, raw_json "
             "FROM raw_events WHERE received_at >= ? ORDER BY received_at DESC LIMIT ?",
             (since, limit),
@@ -1053,10 +1237,10 @@ class Store:
         return out
 
     async def symbol_map(
-        self, *, minutes: int, min_articles: int
+        self, *, minutes: int, min_articles: int, limit: int = 500
     ) -> dict[str, int]:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
-        cur = await self.conn.execute(
+        cur = await self.rconn.execute(
             """
             SELECT symbol, COUNT(DISTINCT article_id) as c
             FROM news_symbol_index
@@ -1064,12 +1248,118 @@ class Store:
             GROUP BY symbol
             HAVING c >= ?
             ORDER BY c DESC, symbol ASC
+            LIMIT ?
             """,
-            (since, min_articles),
+            (since, min_articles, limit),
         )
         rows = await cur.fetchall()
         await cur.close()
         return {r["symbol"]: int(r["c"]) for r in rows}
+
+    async def symbol_pulse(
+        self,
+        *,
+        minutes: int,
+        symbols: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict[str, dict[str, Any]]:
+        """Per-symbol news pulse: article velocity, alert-category counts,
+        direction skew, and the latest headline — 'what is the news saying
+        about X' without shipping article bodies."""
+        since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+        params: list[Any] = [since]
+        symbol_clause = ""
+        if symbols:
+            placeholders = ",".join("?" * len(symbols))
+            symbol_clause = f" AND symbol IN ({placeholders})"
+            params.extend(s.upper() for s in symbols)
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, COUNT(DISTINCT article_id) AS articles
+            FROM news_symbol_index
+            WHERE received_at >= ?{symbol_clause}
+            GROUP BY symbol
+            ORDER BY articles DESC, symbol ASC
+            LIMIT ?
+            """,
+            (*params, limit),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+
+        def _zero_entry() -> dict[str, Any]:
+            return {
+                "articles": 0,
+                "alerts": {},
+                "direction": {"bullish": 0, "bearish": 0, "neutral": 0},
+                "latest_headline": None,
+                "latest_at": None,
+            }
+
+        # Explicitly requested symbols always get a row: a watchlist name
+        # with zero articles in the window is signal (quiet), not something
+        # to silently omit.
+        out: dict[str, dict[str, Any]] = (
+            {s.upper(): _zero_entry() for s in symbols} if symbols else {}
+        )
+        for r in rows:
+            out.setdefault(r["symbol"], _zero_entry())["articles"] = int(
+                r["articles"]
+            )
+        if not out:
+            return out
+        selected = sorted(out)
+        placeholders = ",".join("?" * len(selected))
+
+        # Latest headline per selected symbol.
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, headline, at FROM (
+                SELECT s.symbol AS symbol, a.headline AS headline,
+                       COALESCE(a.updated_at, a.created_at, a.first_seen_at) AS at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY s.symbol
+                           ORDER BY COALESCE(a.updated_at, a.created_at,
+                                             a.first_seen_at) DESC
+                       ) AS rn
+                FROM news_symbol_index s
+                JOIN news_articles a ON a.id = s.article_id
+                WHERE s.received_at >= ? AND s.symbol IN ({placeholders})
+            ) WHERE rn = 1
+            """,
+            (since, *selected),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            out[r["symbol"]]["latest_headline"] = r["headline"]
+            out[r["symbol"]]["latest_at"] = r["at"]
+
+        # Alert category + direction counts per symbol (symbols_json is a
+        # JSON array; json_each unnests it).
+        cur = await self.rconn.execute(
+            f"""
+            SELECT je.value AS symbol, al.category AS category,
+                   al.direction AS direction, COUNT(*) AS c
+            FROM alerts al, json_each(al.symbols_json) je
+            WHERE al.created_at >= ? AND je.value IN ({placeholders})
+            GROUP BY je.value, al.category, al.direction
+            """,
+            (since, *selected),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            entry = out.get(r["symbol"])
+            if entry is None:
+                continue
+            entry["alerts"][r["category"]] = (
+                entry["alerts"].get(r["category"], 0) + int(r["c"])
+            )
+            direction = r["direction"] or "neutral"
+            if direction in entry["direction"]:
+                entry["direction"][direction] += int(r["c"])
+        return out
 
     async def prune_retention(
         self, *, event_days: int, raw_event_days: int

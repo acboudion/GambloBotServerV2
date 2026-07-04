@@ -355,3 +355,164 @@ async def test_category_and_source_filters_capped(app):
         out = await _call(mcp, tool, **kwargs)
         assert out["error"] == "limit_exceeded", tool
         assert out["max_allowed"] == 50, tool
+
+
+async def _ingest(store, article_id: int, headline: str, symbols=None, **extra):
+    payload = {"T": "n", "id": article_id, "headline": headline,
+               "symbols": symbols or ["AAPL"]}
+    payload.update(extra)
+    return await store.upsert_article(
+        normalize_news_message(payload), source_kind="ws"
+    )
+
+
+@pytest.mark.asyncio
+async def test_alert_filter_validation(app):
+    """A typo'd severity/category must be a structured error, not a silent
+    zero-alert result; min_severity means 'this level and above'."""
+    mcp = build_mcp()
+    out = await _call(mcp, "get_alerts_since", severity="hgih")
+    assert out["error"] == "invalid_severity"
+    out = await _call(mcp, "get_news_alerts", categories=["mna_keyw0rd"])
+    assert out["error"] == "invalid_categories"
+    out = await _call(mcp, "get_alerts_since", severity="high", min_severity="high")
+    assert out["error"] == "conflicting_filters"
+
+    from alpaca_news_mcp.models import Alert
+    for sev, aid in (("critical", "c1"), ("high", "h1"), ("medium", "m1")):
+        await app.store.record_alert(
+            Alert(
+                alert_id=aid, article_id=None,
+                created_at="2026-07-04T00:00:00+00:00", severity=sev,
+                category="mna_keyword", symbols=["AAPL"], headline=None,
+                reason="r", acknowledged=False,
+            ),
+            raw_json="{}",
+        )
+    out = await _call(mcp, "get_alerts_since", min_severity="high")
+    got = {a["alert_id"] for a in out["alerts"]}
+    assert got == {"c1", "h1"}
+
+
+@pytest.mark.asyncio
+async def test_breaking_digest_no_silent_fallback(app):
+    """No breaking matches -> empty digest with breaking_matches=false, not
+    ordinary articles dressed up as breaking."""
+    mcp = build_mcp()
+    await _ingest(app.store, 1, "Quarterly report published on schedule")
+    out = await _call(mcp, "get_breaking_news_digest", minutes=60)
+    assert out["breaking_matches"] is False
+    assert out["articles"] == []
+
+    await _ingest(app.store, 2, "BREAKING: trading halted in XYZ")
+    out = await _call(mcp, "get_breaking_news_digest", minutes=60)
+    assert out["breaking_matches"] is True
+    assert [a["id"] for a in out["articles"]] == [2]
+
+
+@pytest.mark.asyncio
+async def test_symbol_map_is_bounded(app):
+    mcp = build_mcp()
+    for i in range(5):
+        await _ingest(app.store, 100 + i, f"story {i}", symbols=[f"SYM{i}"])
+    out = await _call(mcp, "get_news_symbol_map", minutes=60, limit=3)
+    assert len(out["symbol_counts"]) == 3
+    assert out["truncated"] is True
+    out = await _call(mcp, "get_news_symbol_map", limit=501)
+    assert out["error"] == "limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_search_news_validates_dates_and_includes_end_day(app):
+    mcp = build_mcp()
+    out = await _call(mcp, "search_news", query="anything", since="yesterday-ish")
+    assert out["error"] == "invalid_date" and out["field"] == "since"
+
+    # An article updated during the `until` day must be included when until
+    # is date-only (end-of-day normalization).
+    await _ingest(
+        app.store, 42, "Midday scoop headline",
+        created_at="2026-07-02T14:00:00Z", updated_at="2026-07-02T14:00:00Z",
+    )
+    out = await _call(mcp, "search_news", query="midday scoop", until="2026-07-02")
+    assert out["count"] == 1
+
+    # "Z"-suffixed bounds are canonicalized to the stored +00:00 form.
+    out = await _call(
+        mcp, "search_news", query="midday scoop",
+        since="2026-07-02T14:00:00Z", until="2026-07-02T14:00:00Z",
+    )
+    assert out["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_news_limit_zero_means_default(app):
+    mcp = build_mcp()
+    for i in range(60):
+        await _ingest(app.store, 200 + i, f"headline {i}")
+    out = await _call(mcp, "get_recent_news", minutes=60, limit=0)
+    assert out["count"] == 50  # MAX_ARTICLES_DEFAULT, not 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_news_history_rejects_blank_symbols(app):
+    """A blanks-only list must not reach the backfill worker as [] — that
+    would fetch unfiltered market-wide news for the whole window."""
+    mcp = build_mcp()
+    out = await _call(mcp, "fetch_news_history", symbols=["  ", ""])
+    assert out["error"] == "no_symbols"
+    # Dedup happens before the count cap: 6 blanks+dupes of one symbol pass.
+    out = await _call(
+        mcp, "fetch_news_history",
+        symbols=["AAPL", "aapl ", " AAPL", "", "  ", "AAPL"],
+        days=400,  # fails on days AFTER symbol cleaning passed
+    )
+    assert out["error"] == "invalid_days"
+
+
+@pytest.mark.asyncio
+async def test_breaking_digest_scans_beyond_response_size(app):
+    """breaking_matches=false claims NOTHING breaking happened — a breaking
+    article ranked below the newest max_articles routine ones must still be
+    found."""
+    mcp = build_mcp()
+    # One breaking article, OLDER than a pile of routine ones.
+    await _ingest(
+        app.store, 500, "Trading halted in XYZ pending news",
+        created_at="2026-07-04T10:00:00Z", updated_at="2026-07-04T10:00:00Z",
+    )
+    for i in range(30):
+        await _ingest(
+            app.store, 600 + i, f"Routine market note {i}",
+            created_at=f"2026-07-04T11:{i:02d}:00Z",
+            updated_at=f"2026-07-04T11:{i:02d}:00Z",
+        )
+    out = await _call(
+        mcp, "get_breaking_news_digest", minutes=60 * 24 * 365, max_articles=5
+    )
+    assert out["breaking_matches"] is True
+    assert [a["id"] for a in out["articles"]] == [500]
+    assert out["scanned"] >= 31
+
+
+@pytest.mark.asyncio
+async def test_news_pulse_returns_all_requested_symbols(app):
+    """`top` bounds discovery mode only; explicitly requested symbols must
+    all come back regardless of activity ranking."""
+    mcp = build_mcp()
+    for i, sym in enumerate(["AA1", "BB2", "CC3"]):
+        await _ingest(app.store, 700 + i, f"story about {sym}", symbols=[sym])
+    out = await _call(
+        mcp, "get_news_pulse", symbols=["AA1", "BB2", "CC3"], top=1
+    )
+    assert set(out["symbols"]) == {"AA1", "BB2", "CC3"}
+    blank = await _call(mcp, "get_news_pulse", symbols=["  "])
+    assert blank["error"] == "no_symbols"
+
+    # A requested symbol with NO articles in the window still gets a row:
+    # zero activity on a watchlist name is signal (quiet), not an omission.
+    out = await _call(mcp, "get_news_pulse", symbols=["AA1", "QUIET"])
+    assert set(out["symbols"]) == {"AA1", "QUIET"}
+    assert out["symbols"]["QUIET"]["articles"] == 0
+    assert out["symbols"]["QUIET"]["latest_headline"] is None
+    assert out["symbols"]["AA1"]["articles"] == 1

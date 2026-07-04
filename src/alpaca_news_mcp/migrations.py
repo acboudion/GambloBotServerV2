@@ -105,11 +105,53 @@ async def _m4_alert_upgrades(conn: aiosqlite.Connection) -> None:
     )
 
 
+async def _m5_alert_seq(conn: aiosqlite.Connection) -> None:
+    """Monotonic alert cursor for delta polling.
+
+    alerts_since previously paged on the implicit rowid, which SQLite reuses
+    once retention prunes the max-rowid row — new alerts could then land at
+    or below a poller's saved cursor and never be delivered."""
+    await ensure_column(conn, "alerts", "seq", "INTEGER")
+    await conn.execute(
+        """
+        UPDATE alerts SET seq = (
+            SELECT rn FROM (
+                SELECT rowid AS rid, ROW_NUMBER() OVER (ORDER BY rowid) AS rn
+                FROM alerts
+            ) WHERE rid = alerts.rowid
+        )
+        WHERE seq IS NULL
+        """
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_seq ON alerts(seq)"
+    )
+
+
 NEWS_MIGRATIONS: list[tuple[int, Migration]] = [
     (1, _m1_news_seq),
     (2, _m2_news_fts),
     (3, _m3_raw_events_replayed),
     (4, _m4_alert_upgrades),
+    (5, _m5_alert_seq),
+]
+
+
+async def _mm1_market_status(conn: aiosqlite.Connection) -> None:
+    """Key/value status table (bar-seq allocation high-water mark)."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_status (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+MARKET_MIGRATIONS: list[tuple[int, Migration]] = [
+    (1, _mm1_market_status),
 ]
 
 

@@ -101,6 +101,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     raw_json TEXT NOT NULL,
     content_hash TEXT,
     direction TEXT NOT NULL DEFAULT 'neutral',
+    -- Monotonic delta-poll cursor. Like news_articles.seq, the unique index
+    -- is created by its migration (m5), which also backfills old rows.
+    seq INTEGER,
     FOREIGN KEY(article_id) REFERENCES news_articles(id)
 );
 

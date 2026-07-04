@@ -7,7 +7,9 @@ import sqlite3
 import aiosqlite
 import pytest
 
+from alpaca_news_mcp.market_store import MarketStore
 from alpaca_news_mcp.migrations import (
+    MARKET_MIGRATIONS,
     NEWS_MIGRATIONS,
     get_user_version,
     migrate,
@@ -144,3 +146,67 @@ async def test_fresh_db_gets_user_version_and_seq_index(open_store):
     )
     row = await cur.fetchone()
     assert row is not None
+
+
+def _insert_old_alert(path: str, alert_id: str, created_at: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO alerts (alert_id, article_id, created_at, severity, category, "
+        "symbols_json, headline, reason, acknowledged, raw_json) "
+        "VALUES (?, NULL, ?, 'high', 'mna_keyword', '[]', 'h', 'r', 0, '{}')",
+        (alert_id, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_m5_backfills_alert_seq_in_rowid_order(tmp_path):
+    path = str(tmp_path / "old.sqlite")
+    _make_old_db(path, [])
+    _insert_old_alert(path, "a-1", "2024-01-01T00:00:00+00:00")
+    _insert_old_alert(path, "a-2", "2024-01-02T00:00:00+00:00")
+    _insert_old_alert(path, "a-3", "2024-01-03T00:00:00+00:00")
+    async with aiosqlite.connect(path) as conn:
+        conn.row_factory = aiosqlite.Row
+        assert not await table_has_column(conn, "alerts", "seq")
+        await migrate(conn, NEWS_MIGRATIONS)
+        cur = await conn.execute("SELECT alert_id, seq FROM alerts ORDER BY seq")
+        rows = await cur.fetchall()
+        assert [(r["alert_id"], r["seq"]) for r in rows] == [
+            ("a-1", 1), ("a-2", 2), ("a-3", 3),
+        ]
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_alerts_seq'"
+        )
+        assert await cur.fetchone() is not None
+
+
+@pytest.mark.asyncio
+async def test_market_migration_creates_status_table_and_is_idempotent(tmp_path):
+    """A market DB from before market_status existed gets the table through
+    the versioned migration chain, not just schema-file IF NOT EXISTS."""
+    path = str(tmp_path / "market_old.sqlite")
+    sqlite3.connect(path).close()  # pre-existing empty DB, user_version 0
+    async with aiosqlite.connect(path) as conn:
+        conn.row_factory = aiosqlite.Row
+        assert await get_user_version(conn) == 0
+        version = await migrate(conn, MARKET_MIGRATIONS)
+        assert version == MARKET_MIGRATIONS[-1][0]
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='market_status'"
+        )
+        assert await cur.fetchone() is not None
+        assert await migrate(conn, MARKET_MIGRATIONS) == version
+
+
+@pytest.mark.asyncio
+async def test_market_store_init_schema_stamps_user_version(tmp_path):
+    """init_schema must leave a versioned record that the market schema
+    steps ran — future upgrades key off PRAGMA user_version."""
+    store = await MarketStore.open(str(tmp_path / "market.sqlite"))
+    try:
+        await store.init_schema()
+        assert await get_user_version(store.conn) == MARKET_MIGRATIONS[-1][0]
+    finally:
+        await store.close()

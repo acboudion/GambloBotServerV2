@@ -10,6 +10,7 @@ Severity = Literal["critical", "high", "medium", "low"]
 AlertCategory = Literal[
     "held_or_interested_symbol",
     "breaking_keyword",
+    "custom_keyword",
     "corporate_action_keyword",
     "earnings_keyword",
     "analyst_keyword",
@@ -23,6 +24,11 @@ AlertCategory = Literal[
     "entitlement_error",
     "gap_fill_failure",
     "coverage_gap",
+    "persist_failure",
+    "watched_story_update",
+    "price_move",
+    "volume_spike",
+    "day_range_break",
     "trading_halt",
     "trading_resume",
     "luld",
@@ -97,6 +103,7 @@ class StreamHealth(BaseModel):
     stale_reconnects: int = 0
     auth_failed: bool = False
     gap_fill_failures: int = 0
+    persist_failures: int = 0
     dropped_replayed: int = 0
     connection_limit_blocked: bool = False
     entitlement_error: bool = False

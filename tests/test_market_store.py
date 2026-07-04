@@ -116,6 +116,94 @@ async def test_prune_ticks_and_bars(market_store):
 
 
 @pytest.mark.asyncio
+async def test_unchanged_bar_redelivery_does_not_advance_cursor(market_store):
+    """Gap-fill redelivers whole windows; identical bars must not consume
+    seqs — a phantom tail seq advances latest_cursor (and the persisted
+    high-water mark) with nothing to deliver, leaving cursor pollers
+    looking permanently behind."""
+    ts = 1_700_000_000 // 60 * 60
+    batch = [
+        ("AAPL", "1min", ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2),
+        ("AAPL", "1min", ts + 60, 1.5, 2.5, 1.0, 2.0, 500, 5, 1.8),
+    ]
+    await market_store.persist_stream_batch(bars=batch)
+    latest = market_store.latest_bar_cursor
+
+    await market_store.persist_stream_batch(bars=list(batch))  # redelivery
+    assert market_store.latest_bar_cursor == latest
+    rows, next_cursor, has_more = await market_store.bars_since(
+        cursor=latest, limit=10
+    )
+    assert rows == [] and next_cursor == latest and not has_more
+
+    # A genuinely changed bar still consumes a seq and re-surfaces.
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", ts, 1.0, 2.0, 0.5, 1.5, 1200, 12, 1.2)]
+    )
+    assert market_store.latest_bar_cursor == latest + 1
+    rows, _, _ = await market_store.bars_since(cursor=latest, limit=10)
+    assert len(rows) == 1 and rows[0]["volume"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_min_bar_seq_uses_filters(market_store):
+    """Bar retention prunes by bar TIMESTAMP, so another symbol can retain
+    an older seq while the requested symbol's rows were pruned — the
+    filtered minimum must expose that gap instead of masking it."""
+    now_ts = int(datetime.now(UTC).timestamp()) // 60 * 60
+    old_ts = now_ts - 40 * 86_400
+    await market_store.persist_stream_batch(
+        bars=[("TSLA", "1min", now_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0)]  # seq 1
+    )
+    await market_store.persist_stream_batch(bars=[
+        ("AAPL", "1min", old_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0),        # seq 2
+        ("AAPL", "1min", old_ts + 60, 1, 2, 0.5, 1.5, 1, 1, 1.0),   # seq 3
+    ])
+    await market_store.prune(tick_retention_minutes=240, bar_retention_days=30)
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", now_ts, 1, 2, 0.5, 1.5, 1, 1, 1.0)]  # seq 4
+    )
+    assert await market_store.min_bar_seq() == 1  # TSLA row masks the prune
+    assert await market_store.min_bar_seq(symbols=["AAPL"]) == 4
+    assert await market_store.min_bar_seq(timeframe="1min") == 1
+    assert await market_store.min_bar_seq(symbols=["aapl"], timeframe="1min") == 4
+
+
+@pytest.mark.asyncio
+async def test_raw_events_retained_beyond_tick_window(market_store):
+    """Raw statuses/corrections are the low-volume audit trail — they keep
+    the day-scale status retention, not the 4-hour tick window that would
+    erase them long before their flattened counterparts."""
+    now = datetime.now(UTC)
+    await market_store.persist_stream_batch(
+        raw_events=[("c", '{"T":"c"}'), ("s", '{"T":"s"}')]
+    )
+    # Backdate one row past the tick window but inside the status horizon.
+    async with market_store._write_lock:
+        await market_store.conn.execute(
+            "UPDATE market_raw_events SET received_at = ? WHERE message_type = 'c'",
+            ((now - timedelta(hours=10)).isoformat(),),
+        )
+        await market_store.conn.commit()
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["raw_events"] == 0
+
+    # Past the status horizon it does get pruned.
+    async with market_store._write_lock:
+        await market_store.conn.execute(
+            "UPDATE market_raw_events SET received_at = ? WHERE message_type = 'c'",
+            ((now - timedelta(days=40)).isoformat(),),
+        )
+        await market_store.conn.commit()
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["raw_events"] == 1
+
+
+@pytest.mark.asyncio
 async def test_recent_statuses_and_lulds(market_store):
     now_us = _us(datetime.now(UTC))
     await market_store.persist_stream_batch(
@@ -163,3 +251,90 @@ async def test_failed_batch_rolls_back(market_store):
     assert trades == []  # the rolled-back trade never landed
     quotes = await market_store.quotes_window("AAPL", since_us=0, limit=10)
     assert len(quotes) == 1
+
+
+@pytest.mark.asyncio
+async def test_market_reads_use_isolated_connection(market_store):
+    assert market_store._read_conn is not None
+    assert market_store.rconn is market_store._read_conn
+
+    # Committed data is visible through the read connection.
+    now = datetime.now(UTC)
+    await market_store.persist_stream_batch(
+        trades=[("AAPL", _us(now), 190.0, 100, "V", "@", "C", 1)]
+    )
+    got = await market_store.trades_window(
+        "AAPL", since_us=_us(now - timedelta(minutes=1)), limit=10
+    )
+    assert len(got) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_store_falls_back_to_writer_connection():
+    store = await MarketStore.open(":memory:")
+    await store.init_schema()
+    try:
+        assert store._read_conn is None
+        assert store.rconn is store.conn
+        # Reads still work on the shared connection.
+        got = await store.trades_window("AAPL", since_us=0, limit=5)
+        assert got == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_bar_seq_watermark_survives_prune_and_restart(tmp_path):
+    path = str(tmp_path / "wm-market.sqlite")
+    store = await MarketStore.open(path)
+    await store.init_schema()
+    old_ts = int((datetime.now(UTC) - timedelta(days=60)).timestamp()) // 60 * 60
+    await store.persist_stream_batch(
+        bars=[("AAPL", "1min", old_ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2)]
+    )
+    _, cursor, _ = await store.bars_since(cursor=0, limit=10)
+    assert cursor >= 1
+    # Retention removes every bar (60 days old vs 30-day retention).
+    await store.prune(tick_retention_minutes=240, bar_retention_days=30)
+    rows, _, _ = await store.bars_since(cursor=0, limit=10)
+    assert rows == []
+    await store.close()
+
+    store = await MarketStore.open(path)
+    await store.init_schema()
+    try:
+        new_ts = int(datetime.now(UTC).timestamp()) // 60 * 60
+        await store.persist_stream_batch(
+            bars=[("AAPL", "1min", new_ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2)]
+        )
+        rows, _, _ = await store.bars_since(cursor=cursor, limit=10)
+        assert [r["ts"] for r in rows] == [new_ts]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_active_halt_survives_tick_retention(market_store):
+    """Statuses/LULDs are pruned on a day-scale retention, not the 4-hour
+    tick window — an active halt must stay visible to get_trading_halts."""
+    now = datetime.now(UTC)
+    five_h_ago = _us(now - timedelta(hours=5))
+    await market_store.persist_stream_batch(
+        trades=[("AAPL", five_h_ago, 190.0, 100, "V", "@", "C", 1)],
+        statuses=[("AAPL", five_h_ago, "H", "Trading Halt", "T1", "News", "C")],
+        lulds=[("AAPL", five_h_ago, 200.0, 180.0, "B", "C")],
+    )
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["trades"] == 1  # the tick is gone
+    statuses = await market_store.recent_statuses(minutes=24 * 60, limit=10)
+    assert len(statuses) == 1  # the halt survives
+    lulds = await market_store.recent_lulds(minutes=24 * 60, limit=10)
+    assert len(lulds) == 1
+
+    # Events older than the status retention do get pruned.
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=0
+    )
+    assert deleted["statuses"] == 1 and deleted["lulds"] == 1

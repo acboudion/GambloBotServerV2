@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import msgpack
 import orjson
@@ -70,6 +70,19 @@ def _status(symbol="AAPL", sc="H", sm="Trading Halt"):
 def _luld(symbol="AAPL"):
     return {"T": "l", "S": symbol, "u": 200.0, "d": 180.0, "i": "B", "z": "C",
             "t": "2026-04-28T15:31:05Z"}
+
+
+def test_exchange_day_key_spans_utc_midnight():
+    """Derived-alert state must key on the EXCHANGE date: in winter,
+    after-hours crosses 00:00 UTC at 19:00 ET, and a UTC-day key would
+    reset day-range/baseline state mid-session."""
+    from alpaca_news_mcp.stock_stream import _exchange_day
+
+    close_ts = int(datetime(2026, 1, 14, 21, 0, tzinfo=UTC).timestamp())  # 16:00 ET
+    late_ah = int(datetime(2026, 1, 15, 0, 30, tzinfo=UTC).timestamp())  # 19:30 ET Jan 14
+    next_pre = int(datetime(2026, 1, 15, 10, 0, tzinfo=UTC).timestamp())  # 05:00 ET Jan 15
+    assert _exchange_day(close_ts) == _exchange_day(late_ah)
+    assert _exchange_day(late_ah) != _exchange_day(next_pre)
 
 
 def test_to_epoch_us_handles_nanosecond_strings_and_datetimes():
@@ -166,6 +179,29 @@ async def test_persist_batch_writes_all_types_and_snapshots(wired):
     assert snap["daily_bar"]["c"] == 190.5
     assert snap["status"]["sc"] == "H"
     assert snap["luld"]["u"] == 200.0
+
+
+@pytest.mark.asyncio
+async def test_persist_batch_swallows_post_commit_alert_failure(wired, monkeypatch):
+    """Alert emission runs after the market transaction commits. If it fails
+    (news DB lock/IO), persist_batch must not raise — the persister's retry
+    would replay the whole batch, and trades/quotes have no uniqueness, so a
+    replay duplicates ticks and inflates volume/tape stats."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("news db locked")
+
+    monkeypatch.setattr(worker, "_emit_market_alerts", boom)
+    batch = [("t", _trade()), ("b", _bar()), ("s", _status())]
+    await worker.persist_batch(batch)  # must not raise
+
+    since_us = _to_epoch_us("2026-04-28T00:00:00Z")
+    trades = await market_store.trades_window("AAPL", since_us=since_us, limit=10)
+    assert len(trades) == 1  # committed exactly once, no retry replay
+    assert len(await market_store.recent_statuses(minutes=10**6)) == 1
+    assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5
 
 
 @pytest.mark.asyncio
@@ -369,8 +405,11 @@ async def test_bar_gap_fill_runs_on_first_session_after_restart(wired):
     """A restarted process must backfill bars on its FIRST connection — stocks
     have no startup backfill, so skipping the first session loses data."""
     cfg, store, market_store, state, alerts = wired
+    # Inside the fill window: gap-fill drops rows older than each symbol's
+    # own start, so the fake bar must be recent.
+    recent = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     fake_client = _FakeMarketClient(
-        bars_by_symbol={"AAPL": [{"t": "2026-04-28T15:29:00Z", "o": 1, "h": 2,
+        bars_by_symbol={"AAPL": [{"t": recent, "o": 1, "h": 2,
                                   "l": 0.5, "c": 1.5, "v": 100, "n": 5, "vw": 1.1}]}
     )
 
@@ -447,7 +486,8 @@ async def test_reconnect_clears_stale_subscription_ack(wired):
     await worker.on_authenticated(FakeWS())
     assert worker.acknowledged_subscription() is None
     assert state.snapshot_health("stocks").acknowledged_subscription is None
-    assert len(sent) == 1  # fresh subscribe was replayed
+    # Fresh subscribe replayed (+ the separate statuses:["*"] frame).
+    assert len(sent) == 2
 
     # Ack from the new session repopulates it.
     await worker.handle_item(FakeWS(), {"T": "subscription", "trades": ["AAPL", "TSLA"]})
@@ -537,21 +577,28 @@ async def test_bar_gap_fill_uses_captured_watermark(wired):
     client = RecordingClient()
     worker = _worker(cfg, store, market_store, state, alerts, market_client=client)
 
-    old_ts = 1_700_000_000 // 60 * 60
+    now_min = int(datetime.now(UTC).timestamp()) // 60 * 60
+    captured_ts = now_min - 1800  # 30 minutes ago, inside the lookback clamp
     await market_store.persist_stream_batch(
-        bars=[("AAPL", "1min", old_ts, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+        bars=[("AAPL", "1min", captured_ts, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
     )
     watermark = await worker.capture_gap_fill_watermark()
+    assert watermark == {"AAPL": captured_ts}
     # A post-reconnect stream bar advances the live latest_bar_ts.
     await market_store.persist_stream_batch(
-        bars=[("AAPL", "1min", old_ts + 3600, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+        bars=[("AAPL", "1min", now_min, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
     )
     await worker._bar_gap_fill(watermark)
-    assert len(starts) == 1
-    assert str(old_ts + 3600) not in starts[0]
-    from datetime import UTC as _UTC
-    from datetime import datetime as _dt
-    assert starts[0] == _dt.fromtimestamp(old_ts, tz=_UTC).isoformat()
+    # AAPL's fetch starts at its captured watermark's 5-min bucket, not at
+    # the advanced live watermark. (TSLA has no bars: 60-min fallback bucket.)
+    aapl_bucket = datetime.fromtimestamp(
+        captured_ts - (captured_ts % 300), tz=UTC
+    ).isoformat()
+    advanced_bucket = datetime.fromtimestamp(
+        now_min - (now_min % 300), tz=UTC
+    ).isoformat()
+    assert aapl_bucket in starts
+    assert advanced_bucket not in starts
 
 
 @pytest.mark.asyncio
@@ -708,3 +755,243 @@ async def test_inflight_frames_for_removed_symbol_do_not_repopulate_cache(wired)
     # Still-subscribed symbols keep updating.
     await worker.persist_batch([("t", _trade(symbol="TSLA", price=250.0))])
     assert market_store.snapshots.get("TSLA")["trade"]["p"] == 250.0
+
+
+@pytest.mark.asyncio
+async def test_dropped_bar_frames_are_direct_persisted(wired):
+    """Queue overflow must not lose bar frames — a mid-stream bar hole is
+    invisible to get_bars_since and gap-fill only runs on reconnect."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    try:
+        await worker.on_dropped_item("b", _bar("AAPL", T="b", ts="2026-04-28T15:31:00Z"))
+        rows, _, _ = await market_store.bars_since(cursor=0, limit=10)
+        assert [r["symbol"] for r in rows] == ["AAPL"]
+        # Ticks stay counted-loss only.
+        await worker.on_dropped_item("q", _quote("AAPL"))
+        assert state.snapshot_health("stocks").articles_dropped == 1
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_stock_recovery_salvages_events_and_counts_tick_loss(wired):
+    """After a double persist failure, statuses/bars get a direct retry and
+    tick losses land in the dropped counter."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    try:
+        batch = [
+            ("t", _trade("AAPL")),
+            ("q", _quote("AAPL")),
+            ("s", _status("AAPL")),
+            ("b", _bar("AAPL", T="b", ts="2026-04-28T15:32:00Z")),
+        ]
+        await worker.recover_failed_batch(batch)
+        # Status + bar salvaged into the store.
+        statuses = await market_store.recent_statuses(minutes=100_000, limit=10)
+        assert len(statuses) == 1
+        rows, _, _ = await market_store.bars_since(cursor=0, limit=10)
+        assert len(rows) == 1
+        # Trade + quote counted as dropped.
+        assert state.snapshot_health("stocks").articles_dropped == 2
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_quote_sampling_thins_across_batches(wired):
+    """STOCK_QUOTE_SAMPLE_MS must dedup per bucket across drains, not just
+    within one batch."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, stock_quote_sample_ms=1000)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    try:
+        base_us = _to_epoch_us("2026-04-28T15:30:00Z")
+        assert base_us is not None
+
+        def q(offset_ms):
+            item = _quote("AAPL")
+            item["t"] = datetime.fromtimestamp(
+                (base_us + offset_ms * 1000) / 1_000_000, tz=UTC
+            ).isoformat()
+            return item
+
+        # Two separate batches inside the SAME 1s bucket.
+        await worker.persist_batch([("q", q(100))])
+        await worker.persist_batch([("q", q(200))])
+        # A third batch in the NEXT bucket.
+        await worker.persist_batch([("q", q(1200))])
+        rows = await market_store.quotes_window(
+            "AAPL", since_us=base_us - 1_000_000, limit=100
+        )
+        assert len(rows) == 2  # one per bucket, not one per batch
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_derived_price_and_volume_alerts(wired):
+    """A sharp move / volume spike on minute bars lands in the alert feed
+    without the bot having to pull bars."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, price_move_alert_pct=3.0, price_move_window_minutes=5,
+                   volume_spike_ratio=5.0)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    try:
+        base = int(datetime(2026, 4, 28, 15, 0, tzinfo=UTC).timestamp())
+
+        def bar(i, close, vol=1000):
+            ts = datetime.fromtimestamp(base + i * 60, tz=UTC).isoformat()
+            return {"T": "b", "S": "AAPL", "o": close, "h": close + 0.1,
+                    "l": close - 0.1, "c": close, "v": vol, "n": 10,
+                    "vw": close, "t": ts}
+
+        # Flat baseline (11 bars), then a +5% move with a 10x volume spike.
+        items = [bar(i, 100.0) for i in range(11)]
+        items.append(bar(11, 105.0, vol=10_000))
+        await worker._emit_derived_alerts(items)
+
+        rows, _, _ = await store.alerts_since(cursor=0, limit=50)
+        cats = {a["category"] for a in rows}
+        assert "price_move" in cats
+        assert "volume_spike" in cats
+        move = next(a for a in rows if a["category"] == "price_move")
+        assert move["severity"] == "high"  # AAPL is on the watchlist
+        assert move["direction"] == "bullish"
+
+        # Dedup window: an identical follow-up doesn't double-alert.
+        await worker._emit_derived_alerts([bar(12, 110.0, vol=20_000)])
+        rows, _, _ = await store.alerts_since(cursor=0, limit=50)
+        assert len([a for a in rows if a["category"] == "price_move"]) == 1
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_statuses_wildcard_subscription_and_background_severity(wired):
+    """statuses:['*'] goes out as a separate frame; halts for non-watchlist
+    symbols become low-severity discovery signal."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, stock_stream_codec="json", stock_status_wildcard=True)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    sent: list = []
+
+    class FakeWS:
+        async def send(self, payload) -> None:
+            sent.append(orjson.loads(payload))
+
+    try:
+        await worker.on_authenticated(FakeWS())
+        assert sent[0]["action"] == "subscribe"
+        assert sent[0]["trades"] == ["AAPL", "TSLA"]
+        assert sent[1] == {"action": "subscribe", "statuses": ["*"]}
+        assert worker._statuses_wildcard_ok is True
+
+        # Background halt (not on watchlist, not interest) -> low severity.
+        await worker.persist_batch([("s", _status("ZZZQ"))])
+        stored = await store.get_alerts(minutes=5, categories=["trading_halt"], limit=10)
+        assert stored[0].severity == "low"
+
+        # Watchlist halt stays critical.
+        await worker.persist_batch([("s", _status("AAPL"))])
+        stored = await store.get_alerts(minutes=5, categories=["trading_halt"], limit=10)
+        severities = {tuple(a.symbols): a.severity for a in stored}
+        assert severities[("AAPL",)] == "critical"
+
+        # A subscription-shaped rejection falls back to watchlist statuses.
+        worker._ws = FakeWS()
+        await worker.handle_error({"T": "error", "code": 405, "msg": "symbol limit"})
+        assert worker._statuses_wildcard_ok is False
+        assert sent[-1] == {"action": "subscribe", "statuses": ["AAPL", "TSLA"]}
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_watchlist_add_spawns_bar_backfill(wired):
+    cfg, store, market_store, state, alerts = wired
+    recent = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        async def bars(self, symbols, *, start_iso, end_iso=None,
+                       timeframe="1Min", limit_per_page=1000):
+            self.calls.append(sorted(symbols))
+            return {s: [{"t": recent, "o": 1, "h": 2, "l": 0.5, "c": 1.5,
+                         "v": 100, "n": 5, "vw": 1.1}] for s in symbols}
+
+        async def is_market_open(self):
+            return True
+
+    client = _Client()
+    worker = _worker(cfg, store, market_store, state, alerts, market_client=client)
+    try:
+        out = await worker.update_watchlist(["NVDA"], mode="add")
+        assert out["added"] == ["NVDA"]
+        for _ in range(80):
+            await asyncio.sleep(0.05)
+            if client.calls:
+                bars = await market_store.bars_window("NVDA", timeframe="1min", limit=5)
+                if bars:
+                    break
+        assert client.calls == [["NVDA"]]
+        bars = await market_store.bars_window("NVDA", timeframe="1min", limit=5)
+        assert len(bars) == 1
+    finally:
+        await worker.stop()
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_configurable_watchlist_cap(wired, monkeypatch):
+    monkeypatch.setenv("MAX_WATCHLIST_SYMBOLS", "3")
+    cfg = Config.from_env()
+    _, store, market_store, state, alerts = None, *wired[1:]
+    StockStreamWorker.reset_singleton()
+    worker = _worker(cfg, store, market_store, state, alerts)
+    try:
+        out = await worker.update_watchlist(["A", "B", "C", "D"], mode="replace")
+        assert out["error"] == "watchlist_too_large"
+        assert out["max_allowed"] == 3
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_quote_sample_state_survives_failed_persist(wired, monkeypatch):
+    """Bucket state must commit only after the transaction succeeds — the
+    persister retries a failed batch, and a pre-committed bucket would make
+    the retry silently drop the sampled quotes."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, stock_quote_sample_ms=1000)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    try:
+        batch = [("q", _quote("AAPL", ts="2026-04-28T15:40:00.100Z"))]
+        real = market_store.persist_stream_batch
+        calls = {"n": 0}
+
+        async def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("SQLITE_BUSY")
+            await real(**kwargs)
+
+        monkeypatch.setattr(market_store, "persist_stream_batch", flaky)
+        with pytest.raises(RuntimeError):
+            await worker.persist_batch(batch)
+        # Retry of the SAME batch must still persist the quote.
+        await worker.persist_batch(batch)
+        since = _to_epoch_us("2026-04-28T15:39:00Z")
+        rows = await market_store.quotes_window("AAPL", since_us=since, limit=10)
+        assert len(rows) == 1
+        # And the committed state now dedups the next batch in-bucket.
+        await worker.persist_batch(
+            [("q", _quote("AAPL", ts="2026-04-28T15:40:00.900Z"))]
+        )
+        rows = await market_store.quotes_window("AAPL", since_us=since, limit=10)
+        assert len(rows) == 1
+    finally:
+        StockStreamWorker.reset_singleton()

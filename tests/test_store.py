@@ -408,3 +408,141 @@ async def test_batch_writer_rolls_back_when_commit_fails(open_store, monkeypatch
     )
     assert await open_store.get_article(3000) is None
     assert await open_store.get_article(3001) is not None
+
+
+@pytest.mark.asyncio
+async def test_reads_use_isolated_connection(open_store):
+    # File-backed store gets a dedicated read-only connection.
+    assert open_store._read_conn is not None
+    assert open_store.rconn is open_store._read_conn
+
+
+@pytest.mark.asyncio
+async def test_reader_does_not_see_uncommitted_batch(open_store):
+    """Tool reads must see only committed data: a batch transaction in
+    flight (or later rolled back) must never leak phantom articles."""
+    committed = normalize_news_message(_payload(900, headline="committed"))
+    await open_store.upsert_article(committed, source_kind="ws")
+
+    class Boom(RuntimeError):
+        pass
+
+    with pytest.raises(Boom):
+        async with open_store.batch_writer() as writer:
+            uncommitted = normalize_news_message(_payload(901, headline="phantom"))
+            await writer.upsert_article(uncommitted, source_kind="ws")
+            # Mid-transaction: the writer connection has the row, but tool
+            # reads (rconn) must not observe it.
+            articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+            assert [a.id for a in articles] == [900]
+            assert await open_store.get_article(901) is None
+            raise Boom()
+
+    # Rolled back: still invisible.
+    articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+    assert [a.id for a in articles] == [900]
+
+    # A committed batch becomes visible to the read connection.
+    async with open_store.batch_writer() as writer:
+        replacement = normalize_news_message(_payload(902, headline="real"))
+        await writer.upsert_article(replacement, source_kind="ws")
+    articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
+    assert [a.id for a in articles] == [900, 902]
+
+
+def _mk_alert(alert_id: str):
+    from alpaca_news_mcp.models import Alert
+
+    return Alert(
+        alert_id=alert_id,
+        article_id=None,
+        created_at="2020-01-01T00:00:00+00:00",
+        severity="high",
+        category="mna_keyword",
+        symbols=["AAPL"],
+        headline="h",
+        reason="r",
+        acknowledged=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_seq_watermarks_survive_prune_and_restart(tmp_path):
+    """Retention can delete the rows carrying MAX(seq); after a restart the
+    allocators must not re-issue consumed seq values or the bot's saved
+    cursors would silently hide all new rows."""
+    from alpaca_news_mcp.store import Store
+
+    path = str(tmp_path / "wm.sqlite")
+    store = await Store.open(path)
+    await store.init_schema()
+    # Article + alert with old timestamps so retention prunes them.
+    payload = _payload(500)
+    payload["created_at"] = "2020-01-01T00:00:00Z"
+    payload["updated_at"] = "2020-01-01T00:00:01Z"
+    await store.upsert_article(normalize_news_message(payload), source_kind="ws")
+    await store.record_alert(_mk_alert("old-alert"), raw_json="{}")
+    articles, news_cursor, _ = await store.articles_since(cursor=0, limit=10)
+    alerts, alert_cursor, _ = await store.alerts_since(cursor=0, limit=10)
+    assert news_cursor >= 1 and alert_cursor >= 1
+
+    # Backdate first_seen/created so the prune removes everything.
+    async with store._write_lock:
+        await store.conn.execute(
+            "UPDATE news_articles SET first_seen_at = '2020-01-02T00:00:00+00:00'"
+        )
+        await store.conn.commit()
+    pruned = await store.prune_retention(event_days=1, raw_event_days=1)
+    assert pruned["articles"] == 1 and pruned["alerts"] >= 1
+    await store.close()
+
+    # Restart on the same file: new rows must allocate ABOVE the old cursors.
+    store = await Store.open(path)
+    await store.init_schema()
+    try:
+        await store.upsert_article(
+            normalize_news_message(_payload(501)), source_kind="ws"
+        )
+        await store.record_alert(_mk_alert("new-alert"), raw_json="{}")
+        articles, _, _ = await store.articles_since(cursor=news_cursor, limit=10)
+        assert [a.id for a in articles] == [501]
+        alerts, _, _ = await store.alerts_since(cursor=alert_cursor, limit=10)
+        assert [a["alert_id"] for a in alerts] == ["new-alert"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_symbol_pulse_rollup(open_store):
+    from alpaca_news_mcp.models import Alert
+
+    for i, headline in enumerate(
+        ["XCorp beats earnings", "XCorp raises outlook", "YCo misses badly"]
+    ):
+        sym = "XC" if i < 2 else "YC"
+        p = _payload(800 + i, headline=headline)
+        p["symbols"] = [sym]
+        await open_store.upsert_article(normalize_news_message(p), source_kind="ws")
+    await open_store.record_alert(
+        Alert(
+            alert_id="p1", article_id=800, created_at="2026-07-04T00:00:00+00:00",
+            severity="high", category="earnings_keyword", symbols=["XC"],
+            headline="XCorp beats earnings", reason="r", acknowledged=False,
+            direction="bullish",
+        ),
+        raw_json="{}",
+    )
+    pulse = await open_store.symbol_pulse(minutes=60 * 24 * 365, limit=10)
+    assert pulse["XC"]["articles"] == 2
+    assert pulse["XC"]["alerts"] == {"earnings_keyword": 1}
+    assert pulse["XC"]["direction"]["bullish"] == 1
+    assert pulse["XC"]["latest_headline"] in (
+        "XCorp beats earnings", "XCorp raises outlook",
+    )
+    assert pulse["YC"]["articles"] == 1
+
+    # Symbol-scoped variant.
+    only = await open_store.symbol_pulse(
+        minutes=60 * 24 * 365, symbols=["YC"], limit=10
+    )
+    assert set(only) == {"YC"}

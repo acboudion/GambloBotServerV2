@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -147,7 +147,7 @@ async def test_stock_bars_tool_and_cursor(app):
     out2 = await _call(mcp, "get_stock_bars", symbol="AAPL", start=start_iso)
     assert out2["count"] == 1
 
-    assert (await _call(mcp, "get_stock_bars", symbol="A", timeframe="5min"))["error"] == "invalid_timeframe"
+    assert (await _call(mcp, "get_stock_bars", symbol="A", timeframe="2min"))["error"] == "invalid_timeframe"
 
     cur = await _call(mcp, "get_bars_since", cursor=0, limit=1)
     assert cur["count"] == 1 and cur["has_more"] is True
@@ -366,11 +366,12 @@ async def test_invalid_dates_return_structured_errors(app_with_client):
     silent fallback to the default window (valid-looking data, wrong dates)."""
     mcp = build_mcp()
     cal = await _call(mcp, "get_market_calendar", start="2026-13-01")
-    assert cal == {"error": "invalid_date", "field": "start", "value": "2026-13-01"}
+    assert (cal["error"], cal["field"], cal["value"]) == ("invalid_date", "start", "2026-13-01")
+    assert "hint" in cal
     ca = await _call(mcp, "get_corporate_actions", end="not-a-date")
-    assert ca == {"error": "invalid_date", "field": "end", "value": "not-a-date"}
+    assert (ca["error"], ca["field"], ca["value"]) == ("invalid_date", "end", "not-a-date")
     bars = await _call(mcp, "get_stock_bars", symbol="AAPL", start="garbage")
-    assert bars == {"error": "invalid_date", "field": "start", "value": "garbage"}
+    assert (bars["error"], bars["field"], bars["value"]) == ("invalid_date", "start", "garbage")
 
 
 @pytest.mark.asyncio
@@ -395,3 +396,280 @@ async def test_get_trading_halts_caps_symbol_count(app):
     )
     assert out["error"] == "limit_exceeded"
     assert out["max_allowed"] == 50
+
+
+@pytest.mark.asyncio
+async def test_latest_market_data_staleness_signal(app):
+    """Pre-disconnect cache entries must be flagged: age_seconds always,
+    stale when the stream is down or the data is old."""
+    mcp = build_mcp()
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    old_us = int((datetime.now(UTC) - timedelta(minutes=10)).timestamp() * 1_000_000)
+    app.market_store.snapshots.update("AAPL", "trade", {"p": 190.5, "ts_us": now_us})
+    app.market_store.snapshots.update("TSLA", "trade", {"p": 250.0, "ts_us": old_us})
+
+    # Stream disconnected (default health): everything from the cache is stale.
+    out = await _call(mcp, "get_latest_market_data", symbols=["AAPL", "TSLA"])
+    assert out["stream_connected"] is False
+    assert set(out["stale"]) == {"AAPL", "TSLA"}
+
+    # Stream connected: only the old entry is stale.
+    app.state.update_health("stocks", connected=True)
+    out = await _call(mcp, "get_latest_market_data", symbols=["AAPL", "TSLA"])
+    assert out["stream_connected"] is True
+    assert out.get("stale") == ["TSLA"]
+    assert out["age_seconds"]["AAPL"] < 60
+    assert out["age_seconds"]["TSLA"] > 300
+
+
+@pytest.mark.asyncio
+async def test_trading_halts_window_clamps_to_retention(app):
+    mcp = build_mcp()
+    out = await _call(mcp, "get_trading_halts", minutes=10_000_000)
+    assert out["clamped_to_minutes"] == app.config.status_retention_days * 1440
+    assert out["window_minutes"] == out["clamped_to_minutes"]
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_context_scalars(app):
+    """~15 scalars from local bars + snapshot; unknown symbols get a
+    per-symbol structured error without failing the call."""
+    now = datetime.now(UTC)
+    now_min = int(now.timestamp()) // 60 * 60
+    today_midnight = now_min - (now_min % 86_400)
+    bars = []
+    for i in range(30):
+        ts = now_min - (30 - i) * 60
+        c = 100.0 + i * 0.5
+        bars.append(("AAPL", "1min", ts, c - 0.2, c + 0.3, c - 0.5, c,
+                     1000, 10, c))
+    # Yesterday's daily bar for prev_close / rel-volume baseline.
+    bars.append(("AAPL", "1day", today_midnight - 86_400,
+                 95.0, 116.0, 94.0, 100.0, 390_000, 3900, 105.0))
+    await app.market_store.persist_stream_batch(bars=bars)
+    app.market_store.snapshots.update(
+        "AAPL", "trade", {"p": 115.5, "ts_us": int(now.timestamp() * 1e6)}
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_symbol_context", symbols=["AAPL", "ZZZQ"])
+    ctx = out["symbols"]["AAPL"]
+    assert ctx["last"] == 115.5
+    assert ctx["prev_close"] == 100.0
+    assert ctx["change_pct"] == pytest.approx(15.5)
+    assert ctx["rsi_14"] == 100.0  # strictly rising closes
+    assert ctx["session_vwap"] is not None
+    assert ctx["range_position"] is not None
+    assert ctx["rel_volume"] is not None
+    assert ctx["halted"] is False
+    assert out["symbols"]["ZZZQ"]["error"] == "no_local_data"
+
+
+@pytest.mark.asyncio
+async def test_symbol_context_halted_from_retained_status_rows(app):
+    """Same restart-mid-halt scenario as the pulse tools: a halt that exists
+    only in stock_statuses (empty snapshot cache) must still flip the
+    context's halted flag — the context block must not present a
+    non-tradable name as tradable."""
+    now = datetime.now(UTC)
+    now_min = int(now.timestamp()) // 60 * 60
+    now_us = int(now.timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", now_min - 60, 100.0, 101.0, 99.5, 100.5,
+               1000, 10, 100.2)],
+        statuses=[("AAPL", now_us - 2_000_000, "H", "Trading Halt", "T1",
+                   "News Pending", "C")],
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_symbol_context", symbols=["AAPL"])
+    assert out["symbols"]["AAPL"]["halted"] is True
+
+
+def test_context_session_window_and_daily_classification():
+    """Symbol-context session boundaries are exchange-time, not UTC or a
+    rolling slice: late after-hours must still cover the morning session,
+    and today's daily bar must not become prev_close after 00:00 UTC."""
+    from alpaca_news_mcp.market_tools import (
+        _context_session,
+        _is_current_trading_day,
+    )
+
+    # 18:00 ET (22:00 UTC, July = EDT): the window must reach the 04:00 ET
+    # session open, not just 8 hours back to 10:00 ET.
+    start, trading_date = _context_session(datetime(2026, 7, 8, 22, 0, tzinfo=UTC))
+    assert start == int(datetime(2026, 7, 8, 8, 0, tzinfo=UTC).timestamp())
+    assert trading_date == date(2026, 7, 8)
+
+    # 05:00 ET premarket: the 8h floor keeps the window from collapsing to
+    # the hour since session open.
+    early = datetime(2026, 7, 8, 9, 0, tzinfo=UTC)
+    start, _ = _context_session(early)
+    assert start == int(early.timestamp()) - 8 * 3600
+
+    # 21:00 ET after-hours = 01:00 UTC on the NEXT UTC day: the trading date
+    # is still July 8, today's daily bar (stamped 04:00 UTC) is the CURRENT
+    # day — not a prior close — and the window still spans the 09:30 open.
+    start, trading_date = _context_session(datetime(2026, 7, 9, 1, 0, tzinfo=UTC))
+    assert trading_date == date(2026, 7, 8)
+    today_daily = int(datetime(2026, 7, 8, 4, 0, tzinfo=UTC).timestamp())
+    assert _is_current_trading_day(today_daily, trading_date) is True
+    prior_daily = int(datetime(2026, 7, 7, 4, 0, tzinfo=UTC).timestamp())
+    assert _is_current_trading_day(prior_daily, trading_date) is False
+    assert start <= int(datetime(2026, 7, 8, 13, 30, tzinfo=UTC).timestamp())
+
+
+@pytest.mark.asyncio
+async def test_get_stock_bars_aggregated_timeframes(app):
+    now_min = int(datetime.now(UTC).timestamp()) // 300 * 300
+    rows = [("AAPL", "1min", now_min + i * 60, 1.0 + i, 2.0 + i, 0.5,
+             1.5 + i, 100, 5, 1.2 + i) for i in range(10)]
+    await app.market_store.persist_stream_batch(bars=rows)
+    mcp = build_mcp()
+    out = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="5min")
+    assert out["count"] == 2
+    assert out["bars"][0][1] == 1.0  # first bucket opens at first bar's open
+    bad = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="3min")
+    assert bad["error"] == "invalid_timeframe"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_stock_bars_aggregate_rest_fallback(app_with_client):
+    """Aggregate timeframes on an empty local store must fall back to REST
+    like 1min/1day do: fetch the underlying minute bars, aggregate them
+    server-side, and report source='rest' — not return an empty result."""
+    minute_bars = [
+        {"t": f"2026-07-02T13:{30 + i}:00Z", "o": 1.0 + i, "h": 2.0 + i,
+         "l": 0.5, "c": 1.5 + i, "v": 100, "n": 5, "vw": 1.2 + i}
+        for i in range(10)
+    ]
+    respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(
+            200, json={"bars": {"AAPL": minute_bars}, "next_page_token": None}
+        )
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="5min",
+                      start="2026-07-02T13:00:00Z")
+    assert out["source"] == "rest"
+    assert out["count"] == 2  # 10 minute bars -> two 5min buckets
+    rows = [dict(zip(out["columns"], r, strict=True)) for r in out["bars"]]
+    assert rows[0]["open"] == 1.0 and rows[0]["close"] == 5.5
+    assert rows[0]["high"] == 6.0 and rows[0]["low"] == 0.5
+    assert rows[0]["volume"] == 500 and rows[0]["trade_count"] == 25
+    assert rows[0]["vwap"] == pytest.approx(3.2)  # volume-weighted
+    assert rows[1]["open"] == 6.0
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_pulse_rows(app):
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(trades=[
+        ("AAPL", now_us - 2_000_000, 100.0, 100, "V", "@", "C", 1),
+        ("AAPL", now_us - 1_000_000, 101.0, 200, "V", "@", "C", 2),
+    ])
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    assert out["columns"][0] == "symbol"
+    row = dict(zip(out["columns"], out["rows"][0], strict=True))
+    assert row["symbol"] == "AAPL"
+    assert row["last"] == 101.0
+    assert row["chg_pct"] == pytest.approx(1.0)
+    assert row["volume"] == 300
+
+
+@pytest.mark.asyncio
+async def test_watchlist_pulse_includes_inactive_symbols(app):
+    """A watchlist symbol with no trades in the window (halted/illiquid)
+    must appear with zero activity and its halted flag — not vanish."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(trades=[
+        ("AAPL", now_us - 1_000_000, 100.0, 100, "V", "@", "C", 1),
+    ])
+    # TSLA: no trades, but a cached halt status.
+    app.market_store.snapshots.update(
+        "TSLA", "status", {"sc": "H", "ts_us": now_us}
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    rows = {r[0]: dict(zip(out["columns"], r, strict=True)) for r in out["rows"]}
+    assert set(rows) == {"AAPL", "TSLA"}
+    assert rows["AAPL"]["trades"] == 1
+    assert rows["TSLA"]["trades"] == 0
+    assert rows["TSLA"]["last"] is None
+    assert rows["TSLA"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_watchlist_pulse_halted_from_retained_status_rows(app):
+    """A halt that predates this process (restart mid-halt, or a symbol added
+    after its halt event) exists only in stock_statuses — the snapshot cache
+    has no status. The retained row must still set halted=true, and a newer
+    retained resume must clear it."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(statuses=[
+        ("TSLA", now_us - 3_000_000, "H", "Trading Halt", "T1", "News Pending", "C"),
+        ("AAPL", now_us - 3_000_000, "H", "Trading Halt", "T1", "News Pending", "C"),
+        ("AAPL", now_us - 1_000_000, "T", "Trading Resumption", "", "", "C"),
+    ])
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    rows = {r[0]: dict(zip(out["columns"], r, strict=True)) for r in out["rows"]}
+    assert rows["TSLA"]["halted"] is True  # DB-only halt, empty snapshot cache
+    assert rows["AAPL"]["halted"] is False  # newest retained row is a resume
+
+
+@pytest.mark.asyncio
+async def test_market_pulse_checks_halts_beyond_first_50_candidates(app, monkeypatch):
+    """Every discovery candidate gets a real halt check, even past the
+    50-symbol-per-query slice."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    # Halt the symbol that lands LAST in insertion order (past slot 50).
+    await app.market_store.persist_stream_batch(
+        statuses=[("ZZT60", now_us, "H", "Trading Halt", "T1", "News", "C")]
+    )
+
+    class _Client:
+        async def movers(self, top=10):
+            gainers = [{"symbol": f"GG{i:02d}", "price": 10.0,
+                        "percent_change": 5.0, "volume": 1000} for i in range(30)]
+            losers = [{"symbol": f"LL{i:02d}", "price": 10.0,
+                       "percent_change": -5.0, "volume": 1000} for i in range(30)]
+            return {"gainers": gainers, "losers": losers}
+
+        async def most_actives(self, by="volume", top=10):
+            actives = [{"symbol": f"ZZT{i:02d}", "volume": 9000} for i in range(61)]
+            return {"most_actives": actives}
+
+    monkeypatch.setattr(app, "market_client", _Client())
+    mcp = build_mcp()
+    out = await _call(mcp, "get_market_pulse", top=50)
+    assert out["count"] > 50
+    by_symbol = {c["symbol"]: c for c in out["candidates"]}
+    assert by_symbol["ZZT60"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_market_pulse_sees_halts_older_than_four_hours(app, monkeypatch):
+    """News-pending/regulatory halts can outlive a 4h window; the halt check
+    spans the full status retention so an old, un-resumed halt still flags."""
+    ten_hours_ago = int(
+        (datetime.now(UTC) - timedelta(hours=10)).timestamp() * 1_000_000
+    )
+    await app.market_store.persist_stream_batch(
+        statuses=[("OLDH", ten_hours_ago, "H", "Trading Halt", "T1", "News", "C")]
+    )
+
+    class _Client:
+        async def movers(self, top=10):
+            return {"gainers": [{"symbol": "OLDH", "price": 5.0,
+                                 "percent_change": 12.0, "volume": 100}],
+                    "losers": []}
+
+        async def most_actives(self, by="volume", top=10):
+            return {"most_actives": []}
+
+    monkeypatch.setattr(app, "market_client", _Client())
+    mcp = build_mcp()
+    out = await _call(mcp, "get_market_pulse", top=10)
+    assert out["candidates"][0]["symbol"] == "OLDH"
+    assert out["candidates"][0]["halted"] is True
