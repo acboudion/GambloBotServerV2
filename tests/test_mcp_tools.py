@@ -508,3 +508,11 @@ async def test_news_pulse_returns_all_requested_symbols(app):
     assert set(out["symbols"]) == {"AA1", "BB2", "CC3"}
     blank = await _call(mcp, "get_news_pulse", symbols=["  "])
     assert blank["error"] == "no_symbols"
+
+    # A requested symbol with NO articles in the window still gets a row:
+    # zero activity on a watchlist name is signal (quiet), not an omission.
+    out = await _call(mcp, "get_news_pulse", symbols=["AA1", "QUIET"])
+    assert set(out["symbols"]) == {"AA1", "QUIET"}
+    assert out["symbols"]["QUIET"]["articles"] == 0
+    assert out["symbols"]["QUIET"]["latest_headline"] is None
+    assert out["symbols"]["AA1"]["articles"] == 1

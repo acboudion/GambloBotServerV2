@@ -37,7 +37,9 @@ def rsi(bars: list[Bar], period: int = 14) -> float | None:
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
     if avg_loss == 0:
-        return 100.0
+        # Only an all-gain window is overbought; a completely flat window
+        # (no gains either) is neutral, not RSI 100.
+        return 100.0 if avg_gain > 0 else 50.0
     rs = avg_gain / avg_loss
     return round(100.0 - 100.0 / (1.0 + rs), 2)
 

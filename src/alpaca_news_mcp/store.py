@@ -1275,16 +1275,26 @@ class Store:
         )
         rows = await cur.fetchall()
         await cur.close()
-        out: dict[str, dict[str, Any]] = {
-            r["symbol"]: {
-                "articles": int(r["articles"]),
+
+        def _zero_entry() -> dict[str, Any]:
+            return {
+                "articles": 0,
                 "alerts": {},
                 "direction": {"bullish": 0, "bearish": 0, "neutral": 0},
                 "latest_headline": None,
                 "latest_at": None,
             }
-            for r in rows
-        }
+
+        # Explicitly requested symbols always get a row: a watchlist name
+        # with zero articles in the window is signal (quiet), not something
+        # to silently omit.
+        out: dict[str, dict[str, Any]] = (
+            {s.upper(): _zero_entry() for s in symbols} if symbols else {}
+        )
+        for r in rows:
+            out.setdefault(r["symbol"], _zero_entry())["articles"] = int(
+                r["articles"]
+            )
         if not out:
             return out
         selected = sorted(out)

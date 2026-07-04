@@ -72,6 +72,19 @@ def _luld(symbol="AAPL"):
             "t": "2026-04-28T15:31:05Z"}
 
 
+def test_exchange_day_key_spans_utc_midnight():
+    """Derived-alert state must key on the EXCHANGE date: in winter,
+    after-hours crosses 00:00 UTC at 19:00 ET, and a UTC-day key would
+    reset day-range/baseline state mid-session."""
+    from alpaca_news_mcp.stock_stream import _exchange_day
+
+    close_ts = int(datetime(2026, 1, 14, 21, 0, tzinfo=UTC).timestamp())  # 16:00 ET
+    late_ah = int(datetime(2026, 1, 15, 0, 30, tzinfo=UTC).timestamp())  # 19:30 ET Jan 14
+    next_pre = int(datetime(2026, 1, 15, 10, 0, tzinfo=UTC).timestamp())  # 05:00 ET Jan 15
+    assert _exchange_day(close_ts) == _exchange_day(late_ah)
+    assert _exchange_day(late_ah) != _exchange_day(next_pre)
+
+
 def test_to_epoch_us_handles_nanosecond_strings_and_datetimes():
     base = datetime(2026, 4, 28, 15, 30, tzinfo=UTC)
     base_us = int(base.timestamp() * 1_000_000)

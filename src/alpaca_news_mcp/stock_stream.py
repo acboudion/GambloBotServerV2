@@ -14,8 +14,9 @@ feed the shared alert table in the news DB so there is a single alert feed.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import msgpack
 import orjson
@@ -57,6 +58,24 @@ BAR_GAP_FILL_FALLBACK_MINUTES = 60
 DERIVED_STATE_MAX_BARS = 60
 VOLUME_BASELINE_MIN_SAMPLES = 10
 RANGE_BREAK_MIN_BARS = 30
+
+
+try:
+    _EASTERN: ZoneInfo | None = ZoneInfo("America/New_York")
+except Exception:  # pragma: no cover - tzdata missing
+    _EASTERN = None
+
+
+def _exchange_day(ts: int) -> date:
+    """Derived-alert day key: the EXCHANGE date, not the UTC day.
+
+    In winter, after-hours crosses 00:00 UTC at 19:00 ET — a UTC-day key
+    would reset the day-range and price/volume baselines mid-session,
+    causing false range-break alerts on post-midnight bars."""
+    dt = datetime.fromtimestamp(ts, tz=UTC)
+    if _EASTERN is not None:
+        dt = dt.astimezone(_EASTERN)
+    return dt.date()
 
 
 def _to_epoch_us(value: Any) -> int | None:
@@ -875,8 +894,9 @@ class StockStreamWorker(BaseStreamWorker):
                 symbol,
                 {"closes": [], "vols": [], "day": None, "hi": None, "lo": None},
             )
-            if st["day"] != ts // 86_400:
-                st.update(day=ts // 86_400, hi=None, lo=None)
+            day = _exchange_day(ts)
+            if st["day"] != day:
+                st.update(day=day, hi=None, lo=None)
                 st["closes"].clear()
                 st["vols"].clear()
             pending: list[Any] = []

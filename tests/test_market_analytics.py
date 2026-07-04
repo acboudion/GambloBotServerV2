@@ -26,6 +26,10 @@ def test_rsi_hand_computed():
     alt = [_bar(i, c, c, c, c) for i, c in enumerate(closes)]
     val = ma.rsi(alt, period=14)
     assert val is not None and 40 <= val <= 60
+    # Completely flat closes: zero gains AND zero losses is neutral — a
+    # halted/illiquid symbol must not read as overbought RSI 100.
+    flat = [_bar(i, 10, 10, 10, 10) for i in range(20)]
+    assert ma.rsi(flat, period=14) == 50.0
 
 
 def test_ema_and_atr():
