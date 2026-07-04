@@ -361,14 +361,17 @@ class StockStreamWorker(BaseStreamWorker):
         log.warning("alpaca stock stream error code=%d msg=%s", code, msg)
 
         entitlement = code == 409
-        alert = self._alerts.stream_error_alert(
-            code=code, message=f"stocks: {msg}", entitlement=entitlement
-        )
-        inserted = await self._store.record_alert(
-            alert, raw_json=orjson.dumps(item, default=str).decode("utf-8")
-        )
-        if inserted:
-            self._state.record_alert(alert)
+        # Same dedup as the news worker: one alert per (stream, code) window,
+        # not one per backoff cycle.
+        if not self._alerts.stream_alert_deduped(self.stream_name, code):
+            alert = self._alerts.stream_error_alert(
+                code=code, message=f"stocks: {msg}", entitlement=entitlement
+            )
+            inserted = await self._store.record_alert(
+                alert, raw_json=orjson.dumps(item, default=str).decode("utf-8")
+            )
+            if inserted:
+                self._state.record_alert(alert)
 
         if code == 402:
             self._state.update_health(
@@ -396,10 +399,12 @@ class StockStreamWorker(BaseStreamWorker):
             self._state.update_health(self.stream_name, last_error=f"{code} {msg}")
 
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
-        if kind in ("s", "l", "raw"):
+        if kind in ("s", "l", "raw", "b", "u", "d"):
             # Halts/LULDs/raw audit events (corrections, cancelErrors,
             # unknowns) are rare, audit-preserved, and alert-relevant — a
-            # quote burst overflowing the queue must not lose them. Persist
+            # quote burst overflowing the queue must not lose them. Bars are
+            # equally rare (~1/symbol/min) and carry the analytical signal a
+            # mid-stream hole in get_bars_since cannot recover. Persist
             # directly, bypassing the queue (persist_batch also emits alerts).
             try:
                 await self.persist_batch([(kind, item)])
@@ -417,6 +422,29 @@ class StockStreamWorker(BaseStreamWorker):
                 "stock ingest queue overflow; dropped %s total_dropped=%d",
                 kind,
                 dropped,
+            )
+
+    async def recover_failed_batch(
+        self, batch: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Ticks are accepted loss once the DB write failed twice, but the
+        rare audit-critical items (halts/LULDs/bars/raw) each get one more
+        direct attempt, and the tick loss lands in the dropped counter."""
+        dropped = 0
+        for kind, item in batch:
+            if kind in ("s", "l", "raw", "b", "u", "d"):
+                try:
+                    await self.persist_batch([(kind, item)])
+                except Exception:
+                    log.exception("direct persist of %s during recovery failed", kind)
+                    dropped += 1
+            else:
+                dropped += 1
+        if dropped:
+            health = self._state.snapshot_health(self.stream_name)
+            self._state.update_health(
+                self.stream_name,
+                articles_dropped=health.articles_dropped + dropped,
             )
 
     # ---- persistence -----------------------------------------------------------------

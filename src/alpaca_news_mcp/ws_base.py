@@ -158,6 +158,12 @@ class BaseStreamWorker:
     async def on_dropped_item(self, kind: str, item: dict[str, Any]) -> None:
         """Called when backpressure is exhausted and an item is dropped."""
 
+    async def recover_failed_batch(
+        self, batch: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Salvage what can be salvaged from a batch whose persist failed
+        twice (subclass hook — e.g. write replayable drop records)."""
+
     async def on_session_ended(self, *, authed: bool) -> None:
         """Called after every connection ends, before the reconnect backoff."""
 
@@ -617,7 +623,47 @@ class BaseStreamWorker:
             try:
                 await self.persist_batch(batch)
             except Exception as e:
-                log.exception("%s persister error: %s", self.stream_name, e)
+                # A dropped batch is silent data loss the recovery watermark
+                # then papers over (later successful batches advance it past
+                # the hole). Retry once — most failures are transient
+                # (SQLITE_BUSY, I/O hiccup) — then hand the batch to the
+                # subclass recovery path and make the loss visible.
+                log.warning(
+                    "%s persister error; retrying batch once: %s",
+                    self.stream_name,
+                    e,
+                )
+                try:
+                    await self.persist_batch(batch)
+                except Exception as e2:
+                    log.exception(
+                        "%s persister retry failed; recovering %d item(s): %s",
+                        self.stream_name,
+                        len(batch),
+                        e2,
+                    )
+                    await self._handle_persist_failure(batch, e2)
             finally:
                 for _ in batch:
                     self._queue.task_done()
+
+    async def _handle_persist_failure(
+        self, batch: list[tuple[str, dict[str, Any]]], error: Exception
+    ) -> None:
+        failures = self._state.snapshot_health(self.stream_name).persist_failures + 1
+        self._state.update_health(self.stream_name, persist_failures=failures)
+        try:
+            await self.recover_failed_batch(batch)
+        except Exception:  # pragma: no cover - defensive
+            log.exception("%s failed-batch recovery also failed", self.stream_name)
+        if self._alerts.stream_alert_deduped(self.stream_name, "persist_failure"):
+            return
+        alert = self._alerts.persist_failure_alert(
+            stream=self.stream_name, batch_size=len(batch), error=str(error)
+        )
+        try:
+            inserted = await self._store.record_alert(alert, raw_json="{}")
+            if inserted:
+                self._state.record_alert(alert)
+        except Exception:  # pragma: no cover - the store may still be down
+            log.exception("failed to record persist_failure alert")

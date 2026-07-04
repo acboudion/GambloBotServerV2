@@ -23,6 +23,7 @@ AlertCategory = Literal[
     "entitlement_error",
     "gap_fill_failure",
     "coverage_gap",
+    "persist_failure",
     "trading_halt",
     "trading_resume",
     "luld",
@@ -97,6 +98,7 @@ class StreamHealth(BaseModel):
     stale_reconnects: int = 0
     auth_failed: bool = False
     gap_fill_failures: int = 0
+    persist_failures: int = 0
     dropped_replayed: int = 0
     connection_limit_blocked: bool = False
     entitlement_error: bool = False

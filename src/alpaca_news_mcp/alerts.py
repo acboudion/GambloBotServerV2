@@ -75,6 +75,12 @@ CRITICAL_PHRASES: set[str] = {
 HIGH_BASE_GROUPS: set[str] = {"mna", "earnings", "financing"}
 MEDIUM_BASE_GROUPS: set[str] = {"analyst", "corporate_action"}
 
+# Dedup window for infrastructure alerts (stream_error / coverage_gap /
+# persist_failure): a stuck condition re-fires its error path every backoff
+# cycle, and without a window the alert feed the bot polls fills with
+# dozens of identical critical alerts per hour.
+STREAM_ALERT_DEDUP_SECONDS = 900.0
+
 BULLISH_TERMS: list[str] = [
     "beats", "raises outlook", "raises guidance", "upgrade", "overweight",
     "buy rating", "approval", "approved", "record revenue", "dividend increase",
@@ -159,6 +165,8 @@ class AlertEngine:
         self.suppressed_alerts = 0
         # (symbol, category) -> monotonic timestamp of last emitted alert
         self._recent_market_alerts: dict[tuple[str, str], float] = {}
+        # (stream, code) -> monotonic timestamp of last infrastructure alert
+        self._recent_stream_alerts: dict[tuple[str, str], float] = {}
         # (symbols-key, category) -> deque of monotonic emit times (rate limit)
         self._emit_times: dict[tuple[str, str], deque[float]] = {}
         # Provisional charges from an open batch transaction (see
@@ -259,6 +267,18 @@ class AlertEngine:
     def discard_pending(self) -> None:
         """Drop provisional charges (batch rolled back — nothing was emitted)."""
         self._pending_emit.clear()
+
+    def stream_alert_deduped(self, stream: str, code: int | str) -> bool:
+        """True when an identical (stream, code) infrastructure alert fired
+        within STREAM_ALERT_DEDUP_SECONDS. Health flags stay the continuous
+        signal; the alert feed gets at most one entry per window."""
+        now = time.monotonic()
+        key = (stream, str(code))
+        last = self._recent_stream_alerts.get(key)
+        if last is not None and now - last < STREAM_ALERT_DEDUP_SECONDS:
+            return True
+        self._recent_stream_alerts[key] = now
+        return False
 
     def _market_alert_deduped(self, symbol: str, category: str) -> bool:
         """True when an identical (symbol, category) alert fired recently."""
@@ -472,6 +492,24 @@ class AlertEngine:
                 f"{stream} reconnect gap-fill failed (attempt {attempt}"
                 f"{', retries exhausted — articles during the disconnect may be missing'
                    if exhausted else ''}): {error}"
+            ),
+            acknowledged=False,
+        )
+
+    def persist_failure_alert(
+        self, *, stream: str, batch_size: int, error: str
+    ) -> Alert:
+        return Alert(
+            alert_id=str(uuid.uuid4()),
+            article_id=None,
+            created_at=_utcnow_iso(),
+            severity="critical",
+            category="persist_failure",
+            symbols=[],
+            headline=None,
+            reason=(
+                f"{stream} persister failed twice; {batch_size} item(s) routed "
+                f"to recovery — some data may be lost: {error}"
             ),
             acknowledged=False,
         )

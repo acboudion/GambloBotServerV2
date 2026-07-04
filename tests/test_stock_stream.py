@@ -708,3 +708,45 @@ async def test_inflight_frames_for_removed_symbol_do_not_repopulate_cache(wired)
     # Still-subscribed symbols keep updating.
     await worker.persist_batch([("t", _trade(symbol="TSLA", price=250.0))])
     assert market_store.snapshots.get("TSLA")["trade"]["p"] == 250.0
+
+
+@pytest.mark.asyncio
+async def test_dropped_bar_frames_are_direct_persisted(wired):
+    """Queue overflow must not lose bar frames — a mid-stream bar hole is
+    invisible to get_bars_since and gap-fill only runs on reconnect."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    try:
+        await worker.on_dropped_item("b", _bar("AAPL", T="b", ts="2026-04-28T15:31:00Z"))
+        rows, _, _ = await market_store.bars_since(cursor=0, limit=10)
+        assert [r["symbol"] for r in rows] == ["AAPL"]
+        # Ticks stay counted-loss only.
+        await worker.on_dropped_item("q", _quote("AAPL"))
+        assert state.snapshot_health("stocks").articles_dropped == 1
+    finally:
+        StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_stock_recovery_salvages_events_and_counts_tick_loss(wired):
+    """After a double persist failure, statuses/bars get a direct retry and
+    tick losses land in the dropped counter."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+    try:
+        batch = [
+            ("t", _trade("AAPL")),
+            ("q", _quote("AAPL")),
+            ("s", _status("AAPL")),
+            ("b", _bar("AAPL", T="b", ts="2026-04-28T15:32:00Z")),
+        ]
+        await worker.recover_failed_batch(batch)
+        # Status + bar salvaged into the store.
+        statuses = await market_store.recent_statuses(minutes=100_000, limit=10)
+        assert len(statuses) == 1
+        rows, _, _ = await market_store.bars_since(cursor=0, limit=10)
+        assert len(rows) == 1
+        # Trade + quote counted as dropped.
+        assert state.snapshot_health("stocks").articles_dropped == 2
+    finally:
+        StockStreamWorker.reset_singleton()

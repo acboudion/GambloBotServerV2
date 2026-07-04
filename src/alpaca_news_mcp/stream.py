@@ -242,12 +242,31 @@ class NewsStreamWorker(BaseStreamWorker):
         except Exception as e:  # pragma: no cover - defensive
             log.exception("failed to record dropped article: %s", e)
 
+    async def recover_failed_batch(
+        self, batch: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """A batch whose persist failed twice is written as replayable
+        queue_overflow_drop raw events — the drop-replay loop re-ingests
+        them once the store recovers. Each record_raw_event is its own
+        short transaction, so it usually succeeds even when the batch
+        commit failed transiently."""
+        for kind, item in batch:
+            if kind != "n":
+                continue
+            await self._store.record_raw_event(
+                endpoint="news_ws",
+                message_type="queue_overflow_drop",
+                raw_json=orjson.dumps(item).decode("utf-8"),
+            )
+
     # ---- coverage-gap + drop replay ---------------------------------------------
 
     async def on_session_ended(self, *, authed: bool) -> None:
         # With REST backfill enabled the reconnect gap-fill recovers the
         # window. Without it the loss is permanent — make it visible.
         if not authed or self._config.enable_rest_backfill:
+            return
+        if self._alerts.stream_alert_deduped(self.stream_name, "coverage_gap"):
             return
         alert = self._alerts.coverage_gap_alert(
             stream=self.stream_name,
@@ -314,12 +333,17 @@ class NewsStreamWorker(BaseStreamWorker):
         )
 
         entitlement = code == 409
-        alert = self._alerts.stream_error_alert(code=code, message=msg, entitlement=entitlement)
-        inserted = await self._store.record_alert(
-            alert, raw_json=orjson.dumps(item).decode("utf-8")
-        )
-        if inserted:
-            self._state.record_alert(alert)
+        # A stuck condition (406 loop, persistent 409) re-enters this path
+        # every backoff cycle — cap the alert feed to one entry per window.
+        if not self._alerts.stream_alert_deduped(self.stream_name, code):
+            alert = self._alerts.stream_error_alert(
+                code=code, message=msg, entitlement=entitlement
+            )
+            inserted = await self._store.record_alert(
+                alert, raw_json=orjson.dumps(item).decode("utf-8")
+            )
+            if inserted:
+                self._state.record_alert(alert)
 
         if code == 402:
             self._state.update_health(authenticated=False, last_error=f"402 {msg}")
