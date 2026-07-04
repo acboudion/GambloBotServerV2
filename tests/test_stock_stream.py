@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import msgpack
 import orjson
@@ -369,8 +369,11 @@ async def test_bar_gap_fill_runs_on_first_session_after_restart(wired):
     """A restarted process must backfill bars on its FIRST connection — stocks
     have no startup backfill, so skipping the first session loses data."""
     cfg, store, market_store, state, alerts = wired
+    # Inside the fill window: gap-fill drops rows older than each symbol's
+    # own start, so the fake bar must be recent.
+    recent = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
     fake_client = _FakeMarketClient(
-        bars_by_symbol={"AAPL": [{"t": "2026-04-28T15:29:00Z", "o": 1, "h": 2,
+        bars_by_symbol={"AAPL": [{"t": recent, "o": 1, "h": 2,
                                   "l": 0.5, "c": 1.5, "v": 100, "n": 5, "vw": 1.1}]}
     )
 
@@ -537,21 +540,28 @@ async def test_bar_gap_fill_uses_captured_watermark(wired):
     client = RecordingClient()
     worker = _worker(cfg, store, market_store, state, alerts, market_client=client)
 
-    old_ts = 1_700_000_000 // 60 * 60
+    now_min = int(datetime.now(UTC).timestamp()) // 60 * 60
+    captured_ts = now_min - 1800  # 30 minutes ago, inside the lookback clamp
     await market_store.persist_stream_batch(
-        bars=[("AAPL", "1min", old_ts, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+        bars=[("AAPL", "1min", captured_ts, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
     )
     watermark = await worker.capture_gap_fill_watermark()
+    assert watermark == {"AAPL": captured_ts}
     # A post-reconnect stream bar advances the live latest_bar_ts.
     await market_store.persist_stream_batch(
-        bars=[("AAPL", "1min", old_ts + 3600, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
+        bars=[("AAPL", "1min", now_min, 1, 2, 0.5, 1.5, 100, 5, 1.1)]
     )
     await worker._bar_gap_fill(watermark)
-    assert len(starts) == 1
-    assert str(old_ts + 3600) not in starts[0]
-    from datetime import UTC as _UTC
-    from datetime import datetime as _dt
-    assert starts[0] == _dt.fromtimestamp(old_ts, tz=_UTC).isoformat()
+    # AAPL's fetch starts at its captured watermark's 5-min bucket, not at
+    # the advanced live watermark. (TSLA has no bars: 60-min fallback bucket.)
+    aapl_bucket = datetime.fromtimestamp(
+        captured_ts - (captured_ts % 300), tz=UTC
+    ).isoformat()
+    advanced_bucket = datetime.fromtimestamp(
+        now_min - (now_min % 300), tz=UTC
+    ).isoformat()
+    assert aapl_bucket in starts
+    assert advanced_bucket not in starts
 
 
 @pytest.mark.asyncio

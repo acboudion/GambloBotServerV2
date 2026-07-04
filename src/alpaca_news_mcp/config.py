@@ -136,6 +136,7 @@ class Config:
     stock_tick_retention_minutes: int
     stock_bar_retention_days: int
     market_retention_interval_seconds: int
+    gap_fill_max_lookback_minutes: int
 
     # REST market context
     alpaca_trading_base_url: str
@@ -226,6 +227,9 @@ class Config:
             stock_bar_retention_days=_get_int("STOCK_BAR_RETENTION_DAYS", 30),
             market_retention_interval_seconds=_get_int(
                 "MARKET_RETENTION_INTERVAL_SECONDS", 900
+            ),
+            gap_fill_max_lookback_minutes=_get_int(
+                "GAP_FILL_MAX_LOOKBACK_MINUTES", 1440
             ),
             alpaca_trading_base_url=_get_str(
                 "ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets"

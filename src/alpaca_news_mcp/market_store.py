@@ -187,6 +187,12 @@ class MarketStore:
                     )
                 if bars:
                     rows = [(*bar, now, self._allocate_bar_seq()) for bar in bars]
+                    # The WHERE clause makes redelivery idempotent: an
+                    # unchanged bar keeps its existing seq and stays
+                    # invisible to get_bars_since cursors — without it,
+                    # every reconnect gap-fill re-delivered its whole
+                    # fetched window as "new" bars. (IS NOT is SQLite's
+                    # null-safe distinct comparison.)
                     await self.conn.executemany(
                         "INSERT INTO stock_bars "
                         "(symbol, timeframe, ts, open, high, low, close, volume, "
@@ -196,7 +202,12 @@ class MarketStore:
                         "  open = excluded.open, high = excluded.high, low = excluded.low, "
                         "  close = excluded.close, volume = excluded.volume, "
                         "  trade_count = excluded.trade_count, vwap = excluded.vwap, "
-                        "  updated_at = excluded.updated_at, seq = excluded.seq",
+                        "  updated_at = excluded.updated_at, seq = excluded.seq "
+                        "WHERE open IS NOT excluded.open OR high IS NOT excluded.high "
+                        "  OR low IS NOT excluded.low OR close IS NOT excluded.close "
+                        "  OR volume IS NOT excluded.volume "
+                        "  OR trade_count IS NOT excluded.trade_count "
+                        "  OR vwap IS NOT excluded.vwap",
                         rows,
                     )
                     # Same transaction as the seq-consuming write, so any

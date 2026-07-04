@@ -684,7 +684,15 @@ class StockStreamWorker(BaseStreamWorker):
     async def _bar_gap_fill(self, watermark: dict[str, int] | None = None) -> None:
         """After a reconnect, backfill minute bars from REST for the watchlist.
         Trades/quotes gaps are deliberately NOT backfilled (accepted loss for
-        tick data; bars carry the analytical signal)."""
+        tick data; bars carry the analytical signal).
+
+        Windows are per symbol: a single min() across the watchlist would let
+        one stale/illiquid symbol drag the fetch back days for everyone and
+        blow the REST pagination cap. Symbols are bucketed by their start
+        (5-minute rounding) so nearby watermarks still share one REST call,
+        and each symbol keeps only rows at/after its own watermark (the
+        watermark bar itself is refetched — it may have been partial when the
+        connection dropped; the idempotent upsert makes that free)."""
         assert self._market_client is not None
         symbols = sorted(self._watchlist)
         if not symbols:
@@ -694,35 +702,51 @@ class StockStreamWorker(BaseStreamWorker):
             if watermark is not None
             else await self._market_store.latest_bar_ts(symbols, timeframe="1min")
         )
-        now = datetime.now(UTC)
-        fallback_start = int(now.timestamp()) - BAR_GAP_FILL_FALLBACK_MINUTES * 60
-        start_ts = min(
-            [latest.get(s, fallback_start) for s in symbols], default=fallback_start
-        )
-        start_iso = datetime.fromtimestamp(start_ts, tz=UTC).isoformat()
-        bars_by_symbol = await self._market_client.bars(
-            symbols, start_iso=start_iso, timeframe="1Min"
-        )
-        rows: list[tuple[Any, ...]] = []
-        for symbol, bars in bars_by_symbol.items():
-            for bar in bars:
-                ts_us = _to_epoch_us(bar.get("t"))
-                if ts_us is None:
-                    continue
-                rows.append(
-                    (
-                        symbol.upper(),
-                        "1min",
-                        ts_us // 1_000_000,
-                        bar.get("o"),
-                        bar.get("h"),
-                        bar.get("l"),
-                        bar.get("c"),
-                        bar.get("v"),
-                        bar.get("n"),
-                        bar.get("vw"),
+        now_ts = int(datetime.now(UTC).timestamp())
+        fallback_start = now_ts - BAR_GAP_FILL_FALLBACK_MINUTES * 60
+        min_start = now_ts - self._config.gap_fill_max_lookback_minutes * 60
+        starts = {s: max(latest.get(s, fallback_start), min_start) for s in symbols}
+        buckets: dict[int, list[str]] = {}
+        for sym, start_ts in starts.items():
+            buckets.setdefault(start_ts - (start_ts % 300), []).append(sym)
+        total_rows = 0
+        filled: set[str] = set()
+        for bucket_start, bucket_symbols in sorted(buckets.items()):
+            start_iso = datetime.fromtimestamp(bucket_start, tz=UTC).isoformat()
+            bars_by_symbol = await self._market_client.bars(
+                bucket_symbols, start_iso=start_iso, timeframe="1Min"
+            )
+            rows: list[tuple[Any, ...]] = []
+            for symbol, bars in bars_by_symbol.items():
+                sym_u = symbol.upper()
+                sym_start = starts.get(sym_u, bucket_start)
+                for bar in bars:
+                    ts_us = _to_epoch_us(bar.get("t"))
+                    if ts_us is None:
+                        continue
+                    ts_s = ts_us // 1_000_000
+                    if ts_s < sym_start:
+                        continue
+                    rows.append(
+                        (
+                            sym_u,
+                            "1min",
+                            ts_s,
+                            bar.get("o"),
+                            bar.get("h"),
+                            bar.get("l"),
+                            bar.get("c"),
+                            bar.get("v"),
+                            bar.get("n"),
+                            bar.get("vw"),
+                        )
                     )
-                )
-        if rows:
-            await self._market_store.upsert_bars(rows)
-            log.info("bar gap-fill upserted %d bars for %d symbols", len(rows), len(bars_by_symbol))
+                if bars:
+                    filled.add(sym_u)
+            if rows:
+                await self._market_store.upsert_bars(rows)
+                total_rows += len(rows)
+        if total_rows:
+            log.info(
+                "bar gap-fill upserted %d bars for %d symbols", total_rows, len(filled)
+            )
