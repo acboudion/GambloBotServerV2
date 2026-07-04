@@ -81,6 +81,10 @@ class BaseStreamWorker:
         self._main_task: asyncio.Task[None] | None = None
         self._persister_task: asyncio.Task[None] | None = None
         self._fatal_auth = False
+        # A 402 from the header-auth probe, held back until message auth has
+        # also failed — alerting it immediately would record a false critical
+        # auth failure on sessions the fallback then authenticates.
+        self._deferred_auth_error: dict[str, Any] | None = None
         # Monotonic deadline set on 406 connection-limit errors; consumed by
         # _run's wait computation instead of sleeping inside handle_error.
         self._backoff_until: float = 0.0
@@ -346,6 +350,7 @@ class BaseStreamWorker:
             max_size=2**22,
         ) as ws:
             self._state.update_health(self.stream_name, connected=True, last_error=None)
+            self._deferred_auth_error = None
             try:
                 authed = await self._await_auth(ws)
                 if not authed:
@@ -357,17 +362,21 @@ class BaseStreamWorker:
                     # Fall back to message auth.
                     authed = await self._auth_via_message(ws)
                 if not authed:
+                    deferred = self._deferred_auth_error
+                    self._deferred_auth_error = None
+                    if deferred is not None:
+                        # The header-auth 402 turned out to be real — both
+                        # auth paths failed, so alert it now.
+                        await self.handle_error(deferred)
                     self._state.update_health(
                         self.stream_name, authenticated=False, last_error="auth failed"
                     )
                     return
 
+                # The header-auth 402 was the already-authenticated quirk;
+                # message auth recovered the session, so no alert.
+                self._deferred_auth_error = None
                 self._authed_this_session = True
-                # A 402 quirk during the header-auth window may have set
-                # _fatal_auth before message auth succeeded — a session that
-                # actually authenticated must not take the slow auth-retry
-                # path (plus a false critical alert) on its next ordinary
-                # disconnect.
                 self._fatal_auth = False
                 self._state.update_health(
                     self.stream_name, authenticated=True, auth_failed=False
@@ -430,10 +439,13 @@ class BaseStreamWorker:
                 elif t == "success" and msg == "authenticated":
                     return True
                 elif t == "error":
-                    await self.handle_error(item)
                     if code == 402:
-                        # Already-authenticated quirks — message auth attempt may still work
+                        # Already-authenticated quirk — message auth may still
+                        # succeed. Defer the alert: _connect_and_run delivers
+                        # it only if the fallback also fails.
+                        self._deferred_auth_error = item
                         return False
+                    await self.handle_error(item)
                     if code in (406,):
                         return False
             if connected and asyncio.get_event_loop().time() > deadline - 1:

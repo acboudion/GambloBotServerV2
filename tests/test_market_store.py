@@ -116,6 +116,70 @@ async def test_prune_ticks_and_bars(market_store):
 
 
 @pytest.mark.asyncio
+async def test_unchanged_bar_redelivery_does_not_advance_cursor(market_store):
+    """Gap-fill redelivers whole windows; identical bars must not consume
+    seqs — a phantom tail seq advances latest_cursor (and the persisted
+    high-water mark) with nothing to deliver, leaving cursor pollers
+    looking permanently behind."""
+    ts = 1_700_000_000 // 60 * 60
+    batch = [
+        ("AAPL", "1min", ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2),
+        ("AAPL", "1min", ts + 60, 1.5, 2.5, 1.0, 2.0, 500, 5, 1.8),
+    ]
+    await market_store.persist_stream_batch(bars=batch)
+    latest = market_store.latest_bar_cursor
+
+    await market_store.persist_stream_batch(bars=list(batch))  # redelivery
+    assert market_store.latest_bar_cursor == latest
+    rows, next_cursor, has_more = await market_store.bars_since(
+        cursor=latest, limit=10
+    )
+    assert rows == [] and next_cursor == latest and not has_more
+
+    # A genuinely changed bar still consumes a seq and re-surfaces.
+    await market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", ts, 1.0, 2.0, 0.5, 1.5, 1200, 12, 1.2)]
+    )
+    assert market_store.latest_bar_cursor == latest + 1
+    rows, _, _ = await market_store.bars_since(cursor=latest, limit=10)
+    assert len(rows) == 1 and rows[0]["volume"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_raw_events_retained_beyond_tick_window(market_store):
+    """Raw statuses/corrections are the low-volume audit trail — they keep
+    the day-scale status retention, not the 4-hour tick window that would
+    erase them long before their flattened counterparts."""
+    now = datetime.now(UTC)
+    await market_store.persist_stream_batch(
+        raw_events=[("c", '{"T":"c"}'), ("s", '{"T":"s"}')]
+    )
+    # Backdate one row past the tick window but inside the status horizon.
+    async with market_store._write_lock:
+        await market_store.conn.execute(
+            "UPDATE market_raw_events SET received_at = ? WHERE message_type = 'c'",
+            ((now - timedelta(hours=10)).isoformat(),),
+        )
+        await market_store.conn.commit()
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["raw_events"] == 0
+
+    # Past the status horizon it does get pruned.
+    async with market_store._write_lock:
+        await market_store.conn.execute(
+            "UPDATE market_raw_events SET received_at = ? WHERE message_type = 'c'",
+            ((now - timedelta(days=40)).isoformat(),),
+        )
+        await market_store.conn.commit()
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["raw_events"] == 1
+
+
+@pytest.mark.asyncio
 async def test_recent_statuses_and_lulds(market_store):
     now_us = _us(datetime.now(UTC))
     await market_store.persist_stream_batch(

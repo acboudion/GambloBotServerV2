@@ -460,8 +460,12 @@ async def test_402_quirk_then_message_auth_success_clears_fatal_auth(wired):
         # path would wait AUTH_RETRY_SECONDS (900s default).
         assert await _wait_for(lambda: sessions["n"] >= 2, deadline_s=8.0)
         assert state.snapshot_health().auth_failed is False
+        # The header-auth 402 is DEFERRED and dropped once message auth
+        # recovers: a session that actually authenticated must record no
+        # stream_error alert at all — not the critical auth-failing one,
+        # and not the immediate code-402 alert either.
         stored = await store.get_alerts(minutes=5, categories=["stream_error"], limit=10)
-        assert not any("authentication failing" in a.reason for a in stored)
+        assert stored == []
     finally:
         await worker.stop()
         server.close()

@@ -192,6 +192,12 @@ class MarketStore:
                         quotes,
                     )
                 if bars:
+                    # Drop unchanged redeliveries BEFORE allocating seqs:
+                    # a phantom tail seq advances latest_cursor (and the
+                    # persisted high-water mark) with nothing to deliver,
+                    # leaving cursor pollers looking permanently behind.
+                    bars = await self._filter_changed_bars(bars)
+                if bars:
                     rows = [(*bar, now, self._allocate_bar_seq()) for bar in bars]
                     # The WHERE clause makes redelivery idempotent: an
                     # unchanged bar keeps its existing seq and stays
@@ -259,6 +265,41 @@ class MarketStore:
         seq = self._next_bar_seq
         self._next_bar_seq += 1
         return seq
+
+    async def _filter_changed_bars(
+        self, bars: list[tuple[Any, ...]]
+    ) -> list[tuple[Any, ...]]:
+        """Drop incoming bars identical to their stored row (gap-fill and
+        reconnect backfills redeliver whole windows). The upsert's WHERE
+        clause already suppresses the no-op write, but only this pre-filter
+        keeps the seq allocator from consuming (and persisting) cursor
+        positions that no row will ever occupy."""
+        keys = [(b[0], b[1], b[2]) for b in bars]
+        existing: dict[tuple[Any, Any, Any], tuple[Any, ...]] = {}
+        for i in range(0, len(keys), 100):
+            chunk = keys[i : i + 100]
+            placeholders = ",".join("(?, ?, ?)" for _ in chunk)
+            cur = await self.conn.execute(
+                "SELECT symbol, timeframe, ts, open, high, low, close, "
+                "volume, trade_count, vwap FROM stock_bars "
+                f"WHERE (symbol, timeframe, ts) IN (VALUES {placeholders})",
+                [v for key in chunk for v in key],
+            )
+            rows = await cur.fetchall()
+            await cur.close()
+            for r in rows:
+                existing[(r["symbol"], r["timeframe"], r["ts"])] = (
+                    r["open"], r["high"], r["low"], r["close"],
+                    r["volume"], r["trade_count"], r["vwap"],
+                )
+        # Python == mirrors the SQL IS NOT comparison closely enough here
+        # (1 == 1.0 both sides); a rare mismatch just degrades to the old
+        # behavior for that one row — the WHERE clause still suppresses it.
+        return [
+            b
+            for b in bars
+            if existing.get((b[0], b[1], b[2])) != tuple(b[3:10])
+        ]
 
     async def upsert_bars(self, bars: list[tuple[Any, ...]]) -> int:
         """REST backfill entry point: same bar row shape as persist_stream_batch."""
@@ -672,7 +713,12 @@ class MarketStore:
             (now - timedelta(days=status_retention_days)).timestamp() * 1_000_000
         )
         bar_cutoff_s = int((now - timedelta(days=bar_retention_days)).timestamp())
-        raw_cutoff_iso = (now - timedelta(minutes=tick_retention_minutes)).isoformat()
+        # Raw events are the low-volume audit trail (corrections,
+        # cancelErrors, recovered batches) — a handful of rows a day kept
+        # for the same day-scale horizon as statuses/LULDs, not the 4-hour
+        # tick window that would erase them long before their flattened
+        # counterparts.
+        raw_cutoff_iso = (now - timedelta(days=status_retention_days)).isoformat()
         deleted: dict[str, int] = {}
         for table in TICK_TABLES:
             deleted[table.removeprefix("stock_")] = await self._chunked_delete(
