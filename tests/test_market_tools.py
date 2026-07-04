@@ -147,7 +147,7 @@ async def test_stock_bars_tool_and_cursor(app):
     out2 = await _call(mcp, "get_stock_bars", symbol="AAPL", start=start_iso)
     assert out2["count"] == 1
 
-    assert (await _call(mcp, "get_stock_bars", symbol="A", timeframe="5min"))["error"] == "invalid_timeframe"
+    assert (await _call(mcp, "get_stock_bars", symbol="A", timeframe="2min"))["error"] == "invalid_timeframe"
 
     cur = await _call(mcp, "get_bars_since", cursor=0, limit=1)
     assert cur["count"] == 1 and cur["has_more"] is True
@@ -428,3 +428,68 @@ async def test_trading_halts_window_clamps_to_retention(app):
     out = await _call(mcp, "get_trading_halts", minutes=10_000_000)
     assert out["clamped_to_minutes"] == app.config.status_retention_days * 1440
     assert out["window_minutes"] == out["clamped_to_minutes"]
+
+
+@pytest.mark.asyncio
+async def test_get_symbol_context_scalars(app):
+    """~15 scalars from local bars + snapshot; unknown symbols get a
+    per-symbol structured error without failing the call."""
+    now = datetime.now(UTC)
+    now_min = int(now.timestamp()) // 60 * 60
+    today_midnight = now_min - (now_min % 86_400)
+    bars = []
+    for i in range(30):
+        ts = now_min - (30 - i) * 60
+        c = 100.0 + i * 0.5
+        bars.append(("AAPL", "1min", ts, c - 0.2, c + 0.3, c - 0.5, c,
+                     1000, 10, c))
+    # Yesterday's daily bar for prev_close / rel-volume baseline.
+    bars.append(("AAPL", "1day", today_midnight - 86_400,
+                 95.0, 116.0, 94.0, 100.0, 390_000, 3900, 105.0))
+    await app.market_store.persist_stream_batch(bars=bars)
+    app.market_store.snapshots.update(
+        "AAPL", "trade", {"p": 115.5, "ts_us": int(now.timestamp() * 1e6)}
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_symbol_context", symbols=["AAPL", "ZZZQ"])
+    ctx = out["symbols"]["AAPL"]
+    assert ctx["last"] == 115.5
+    assert ctx["prev_close"] == 100.0
+    assert ctx["change_pct"] == pytest.approx(15.5)
+    assert ctx["rsi_14"] == 100.0  # strictly rising closes
+    assert ctx["session_vwap"] is not None
+    assert ctx["range_position"] is not None
+    assert ctx["rel_volume"] is not None
+    assert ctx["halted"] is False
+    assert out["symbols"]["ZZZQ"]["error"] == "no_local_data"
+
+
+@pytest.mark.asyncio
+async def test_get_stock_bars_aggregated_timeframes(app):
+    now_min = int(datetime.now(UTC).timestamp()) // 300 * 300
+    rows = [("AAPL", "1min", now_min + i * 60, 1.0 + i, 2.0 + i, 0.5,
+             1.5 + i, 100, 5, 1.2 + i) for i in range(10)]
+    await app.market_store.persist_stream_batch(bars=rows)
+    mcp = build_mcp()
+    out = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="5min")
+    assert out["count"] == 2
+    assert out["bars"][0][1] == 1.0  # first bucket opens at first bar's open
+    bad = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="3min")
+    assert bad["error"] == "invalid_timeframe"
+
+
+@pytest.mark.asyncio
+async def test_get_watchlist_pulse_rows(app):
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(trades=[
+        ("AAPL", now_us - 2_000_000, 100.0, 100, "V", "@", "C", 1),
+        ("AAPL", now_us - 1_000_000, 101.0, 200, "V", "@", "C", 2),
+    ])
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    assert out["columns"][0] == "symbol"
+    row = dict(zip(out["columns"], out["rows"][0], strict=True))
+    assert row["symbol"] == "AAPL"
+    assert row["last"] == 101.0
+    assert row["chg_pct"] == pytest.approx(1.0)
+    assert row["volume"] == 300

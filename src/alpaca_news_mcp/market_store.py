@@ -324,6 +324,186 @@ class MarketStore:
         await cur.close()
         return [dict(r) for r in rows]
 
+    async def bars_window_aggregated(
+        self,
+        symbol: str,
+        *,
+        bucket_seconds: int,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int = 390,
+    ) -> list[dict[str, Any]]:
+        """Server-side multi-timeframe aggregation over stored 1min bars:
+        5min/15min/1hour structure at a fraction of the row count (and token
+        cost) of raw minute bars. UTC-aligned buckets; vwap is re-weighted by
+        volume across the bucket."""
+        clauses = ["symbol = ?", "timeframe = '1min'"]
+        params: list[Any] = [symbol.strip().upper()]
+        if start_ts is not None:
+            clauses.append("ts >= ?")
+            params.append(start_ts)
+        if end_ts is not None:
+            clauses.append("ts <= ?")
+            params.append(end_ts)
+        sql = f"""
+            SELECT ts, open, high, low, close, volume, trade_count, vwap FROM (
+              SELECT bucket_ts AS ts,
+                     FIRST_VALUE(open) OVER w AS open,
+                     MAX(high) OVER w AS high,
+                     MIN(low) OVER w AS low,
+                     LAST_VALUE(close) OVER w AS close,
+                     SUM(volume) OVER w AS volume,
+                     SUM(trade_count) OVER w AS trade_count,
+                     CAST(SUM(vwap * volume) OVER w AS REAL)
+                         / NULLIF(SUM(volume) OVER w, 0) AS vwap,
+                     ROW_NUMBER() OVER (
+                         PARTITION BY bucket_ts ORDER BY bar_ts DESC
+                     ) AS rn
+              FROM (
+                SELECT ts - (ts % ?) AS bucket_ts, ts AS bar_ts,
+                       open, high, low, close, volume, trade_count, vwap
+                FROM stock_bars
+                WHERE {" AND ".join(clauses)}
+              )
+              WINDOW w AS (
+                PARTITION BY bucket_ts ORDER BY bar_ts
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+              )
+            ) WHERE rn = 1
+            ORDER BY ts DESC LIMIT ?
+        """
+        cur = await self.rconn.execute(sql, (bucket_seconds, *params, limit))
+        rows = await cur.fetchall()
+        await cur.close()
+        out = [dict(r) for r in rows]
+        out.reverse()  # most-recent-limited, returned ascending like bars_window
+        return out
+
+    async def tape_stats(
+        self,
+        symbol: str,
+        *,
+        since_us: int,
+        bucket_us: int,
+        block_size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Bucketed trade-tape digest: tape speed, uptick/downtick counts via
+        the tick rule (LAG over price), block-trade count, bucket VWAP."""
+        cur = await self.rconn.execute(
+            """
+            WITH t AS (
+              SELECT ts_us, price, size,
+                     LAG(price) OVER (ORDER BY ts_us) AS prev_price
+              FROM stock_trades WHERE symbol = ? AND ts_us >= ?
+            )
+            SELECT (ts_us / ?) * ? AS bucket_us,
+                   COUNT(*) AS trades,
+                   SUM(size) AS volume,
+                   CAST(SUM(price * size) AS REAL) / NULLIF(SUM(size), 0) AS vwap,
+                   SUM(CASE WHEN prev_price IS NOT NULL AND price > prev_price
+                       THEN 1 ELSE 0 END) AS upticks,
+                   SUM(CASE WHEN prev_price IS NOT NULL AND price < prev_price
+                       THEN 1 ELSE 0 END) AS downticks,
+                   SUM(CASE WHEN size >= ? THEN 1 ELSE 0 END) AS block_trades,
+                   MIN(price) AS low, MAX(price) AS high
+            FROM t GROUP BY bucket_us ORDER BY bucket_us ASC
+            """,
+            (symbol.strip().upper(), since_us, bucket_us, bucket_us, block_size),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def quote_stats(
+        self, symbol: str, *, since_us: int, bucket_us: int
+    ) -> list[dict[str, Any]]:
+        """Bucketed NBBO digest: average spread in bps and bid-size fraction
+        (order-book imbalance proxy)."""
+        cur = await self.rconn.execute(
+            """
+            SELECT (ts_us / ?) * ? AS bucket_us,
+                   COUNT(*) AS quotes,
+                   AVG((ask_price - bid_price) * 20000.0
+                       / NULLIF(ask_price + bid_price, 0)) AS spread_bps,
+                   AVG(CAST(bid_size AS REAL)
+                       / NULLIF(bid_size + ask_size, 0)) AS bid_fraction
+            FROM stock_quotes
+            WHERE symbol = ? AND ts_us >= ? AND bid_price > 0 AND ask_price > 0
+            GROUP BY bucket_us ORDER BY bucket_us ASC
+            """,
+            (bucket_us, bucket_us, symbol.strip().upper(), since_us),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        return [dict(r) for r in rows]
+
+    async def watchlist_pulse(
+        self, symbols: list[str], *, since_us: int
+    ) -> dict[str, dict[str, Any]]:
+        """One aggregate row per symbol over the window: first/last price,
+        change, volume, trade count, average spread."""
+        if not symbols:
+            return {}
+        upper = sorted({s.strip().upper() for s in symbols if s.strip()})
+        placeholders = ",".join("?" * len(upper))
+        out: dict[str, dict[str, Any]] = {}
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, COUNT(*) AS trades, SUM(size) AS volume,
+                   MIN(price) AS low, MAX(price) AS high
+            FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            (since_us, *upper),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            out[r["symbol"]] = dict(r)
+        if not out:
+            return out
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol, price, kind FROM (
+              SELECT symbol, price, 'first' AS kind,
+                     ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us ASC) AS rn
+              FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
+            ) WHERE rn = 1
+            UNION ALL
+            SELECT symbol, price, kind FROM (
+              SELECT symbol, price, 'last' AS kind,
+                     ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY ts_us DESC) AS rn
+              FROM stock_trades WHERE ts_us >= ? AND symbol IN ({placeholders})
+            ) WHERE rn = 1
+            """,
+            (since_us, *upper, since_us, *upper),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            entry = out.setdefault(r["symbol"], {})
+            entry["first_price" if r["kind"] == "first" else "last_price"] = r["price"]
+        cur = await self.rconn.execute(
+            f"""
+            SELECT symbol,
+                   AVG((ask_price - bid_price) * 20000.0
+                       / NULLIF(ask_price + bid_price, 0)) AS spread_bps
+            FROM stock_quotes
+            WHERE ts_us >= ? AND symbol IN ({placeholders})
+              AND bid_price > 0 AND ask_price > 0
+            GROUP BY symbol
+            """,
+            (since_us, *upper),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+        for r in rows:
+            if r["symbol"] in out:
+                out[r["symbol"]]["spread_bps"] = (
+                    round(r["spread_bps"], 2) if r["spread_bps"] is not None else None
+                )
+        return out
+
     @property
     def latest_bar_cursor(self) -> int:
         """Highest allocated bar seq; see Store.latest_article_cursor."""

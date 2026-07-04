@@ -53,7 +53,14 @@ MAX_CORPORATE_ACTIONS = 200
 CORPORATE_ACTIONS_MAX_RANGE_DAYS = 90
 
 VALID_INCLUDE = ("trade", "quote", "bar", "daily_bar", "status", "luld")
+# Timeframes stored as rows (stream-ingested).
 VALID_TIMEFRAMES = ("1min", "1day")
+# Timeframes served by SQL aggregation over stored 1min bars.
+AGGREGATE_TIMEFRAMES = {"5min": 300, "15min": 900, "1hour": 3600}
+BAR_TIMEFRAMES = VALID_TIMEFRAMES + tuple(AGGREGATE_TIMEFRAMES)
+MAX_CONTEXT_SYMBOLS = 20
+MAX_TAPE_BUCKETS = 360
+MAX_PULSE_TOP = 50
 
 # Snapshot-cache slot names per include key.
 _INCLUDE_TO_SLOT = {
@@ -356,7 +363,9 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool(
         description=(
-            "OHLCV bars for one symbol from the local store. timeframe: 1min|1day. "
+            "OHLCV bars for one symbol from the local store. timeframe: "
+            "1min|5min|15min|1hour|1day (5min/15min/1hour are aggregated "
+            "server-side from 1min bars). "
             "start/end are ISO-8601. Rows ascend by time: "
             "[ts, open, high, low, close, volume, trade_count, vwap]; "
             "`ts` is the bar start in epoch SECONDS (UTC). With more rows "
@@ -375,11 +384,11 @@ def register(mcp: FastMCP) -> None:
         if parts is None:
             return _stream_disabled()
         _, market_store = parts
-        if timeframe not in VALID_TIMEFRAMES:
+        if timeframe not in BAR_TIMEFRAMES:
             return _err(
                 "invalid_timeframe",
-                f"use one of: {', '.join(VALID_TIMEFRAMES)}",
-                valid=list(VALID_TIMEFRAMES),
+                f"use one of: {', '.join(BAR_TIMEFRAMES)}",
+                valid=list(BAR_TIMEFRAMES),
             )
         if limit > MAX_BARS:
             return _limit_exceeded(MAX_BARS, limit)
@@ -390,13 +399,22 @@ def register(mcp: FastMCP) -> None:
         if end and end_ts is None:
             return _invalid_date("end", end)
         symbol = symbol.strip().upper()
-        rows = await market_store.bars_window(
-            symbol,
-            timeframe=timeframe,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            limit=max(1, limit),
-        )
+        if timeframe in AGGREGATE_TIMEFRAMES:
+            rows = await market_store.bars_window_aggregated(
+                symbol,
+                bucket_seconds=AGGREGATE_TIMEFRAMES[timeframe],
+                start_ts=start_ts,
+                end_ts=end_ts,
+                limit=max(1, limit),
+            )
+        else:
+            rows = await market_store.bars_window(
+                symbol,
+                timeframe=timeframe,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                limit=max(1, limit),
+            )
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -523,6 +541,310 @@ def register(mcp: FastMCP) -> None:
         if clamped:
             out["clamped_to_minutes"] = minutes
         return out
+
+    # ---- derived analytics (local SQLite + snapshot cache) -------------------
+
+    @mcp.tool(
+        description=(
+            "Server-computed trading context per symbol (~15 scalars from "
+            "locally stored bars + the live snapshot cache): last price, "
+            "change/gap vs previous close, session VWAP distance, RSI-14 / "
+            "EMA-9 / EMA-21 / ATR-14 (1min bars), day range position, "
+            "volume vs 10-day average (time-adjusted), and halt flag. "
+            "Much cheaper than reading raw bar arrays. Requires the symbol "
+            "to be locally ingested (watchlist)."
+        )
+    )
+    async def get_symbol_context(symbols: list[str]) -> dict[str, Any]:
+        from . import market_analytics as ma
+
+        app = get_app_state()
+        parts = _market_parts(app)
+        if parts is None:
+            return _stream_disabled()
+        _, market_store = parts
+        if not symbols:
+            return _err("no_symbols", "pass at least one ticker symbol")
+        if len(symbols) > MAX_CONTEXT_SYMBOLS:
+            return _limit_exceeded(MAX_CONTEXT_SYMBOLS, len(symbols))
+        now = datetime.now(UTC)
+        now_ts = int(now.timestamp())
+        today_midnight = now_ts - (now_ts % 86_400)
+        out: dict[str, Any] = {}
+        for raw_sym in symbols:
+            sym = raw_sym.strip().upper()
+            minute_bars = await market_store.bars_window(
+                sym, timeframe="1min", start_ts=now_ts - 8 * 3600, limit=MAX_BARS
+            )
+            daily_bars = await market_store.bars_window(
+                sym, timeframe="1day", limit=15
+            )
+            snap = market_store.snapshots.get(sym) or {}
+            trade = snap.get("trade") or {}
+            last = trade.get("p") if isinstance(trade.get("p"), (int, float)) else None
+            if last is None and minute_bars:
+                last = minute_bars[-1]["close"]
+            if not minute_bars and last is None:
+                out[sym] = _err(
+                    "no_local_data",
+                    "no locally stored bars — add the symbol with "
+                    "set_stock_watchlist or use get_stock_snapshots (REST)",
+                )
+                continue
+
+            # Previous close + prior daily volumes (excluding today's daily).
+            prev_close = None
+            prior_volumes: list[float] = []
+            if daily_bars:
+                if daily_bars[-1]["ts"] >= today_midnight:
+                    prior = daily_bars[:-1]
+                else:
+                    prior = daily_bars
+                if prior:
+                    prev_close = prior[-1]["close"]
+                prior_volumes = [
+                    float(b["volume"]) for b in prior if b.get("volume")
+                ]
+
+            highs = [b["high"] for b in minute_bars if b.get("high") is not None]
+            lows = [b["low"] for b in minute_bars if b.get("low") is not None]
+            day_high = max(highs) if highs else None
+            day_low = min(lows) if lows else None
+            volume_today = float(
+                sum(b["volume"] or 0 for b in minute_bars)
+            )
+            today_open = minute_bars[0]["open"] if minute_bars else None
+            vwap = ma.session_vwap(minute_bars)
+            status = snap.get("status") or {}
+            entry: dict[str, Any] = {
+                "last": last,
+                "prev_close": prev_close,
+                "change_pct": ma.pct_change(last, prev_close),
+                "gap_pct": ma.gap_pct(today_open, prev_close),
+                "session_vwap": vwap,
+                "vwap_distance_pct": ma.pct_change(last, vwap),
+                "rsi_14": ma.rsi(minute_bars),
+                "ema_9": ma.ema(minute_bars, 9),
+                "ema_21": ma.ema(minute_bars, 21),
+                "atr_14": ma.atr(minute_bars),
+                "day_high": day_high,
+                "day_low": day_low,
+                "range_position": ma.day_range_position(last, day_high, day_low),
+                "volume_today": volume_today or None,
+                "rel_volume": ma.relative_volume(
+                    volume_today, prior_volumes, len(minute_bars) / 390.0
+                ),
+                "minute_bars_used": len(minute_bars),
+                "halted": status.get("sc") == "H" if status else False,
+            }
+            out[sym] = entry
+        return {"symbols": out, "as_of": now.isoformat()}
+
+    @mcp.tool(
+        description=(
+            "Bucketed tape/microstructure digest for one symbol from the "
+            "rolling tick store: per-bucket trade count (tape speed), volume, "
+            "VWAP, uptick/downtick counts, block-trade count, price range, "
+            "average spread (bps), and bid-size fraction (imbalance proxy). "
+            "Rows: [ts_us, trades, volume, vwap, upticks, downticks, "
+            "block_trades, low, high, quotes, spread_bps, bid_fraction]; "
+            "ts_us = bucket start, epoch MICROSECONDS (UTC)."
+        )
+    )
+    async def get_tape_stats(
+        symbol: str,
+        minutes: int = 30,
+        bucket_seconds: int = 60,
+        block_size: int = 1000,
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        parts = _market_parts(app)
+        if parts is None:
+            return _stream_disabled()
+        _, market_store = parts
+        if minutes > MAX_WINDOW_MINUTES:
+            return _limit_exceeded(MAX_WINDOW_MINUTES, minutes)
+        minutes = max(1, minutes)
+        bucket_seconds = max(10, min(bucket_seconds, 3600))
+        if minutes * 60 // bucket_seconds > MAX_TAPE_BUCKETS:
+            return _err(
+                "too_many_buckets",
+                f"minutes*60/bucket_seconds must be <= {MAX_TAPE_BUCKETS}; "
+                "use a larger bucket_seconds or a smaller window",
+                max_buckets=MAX_TAPE_BUCKETS,
+            )
+        symbol = symbol.strip().upper()
+        since_us = _minutes_ago_us(minutes)
+        bucket_us = bucket_seconds * 1_000_000
+        trade_rows = await market_store.tape_stats(
+            symbol, since_us=since_us, bucket_us=bucket_us,
+            block_size=max(1, block_size),
+        )
+        quote_rows = await market_store.quote_stats(
+            symbol, since_us=since_us, bucket_us=bucket_us
+        )
+        quotes_by_bucket = {r["bucket_us"]: r for r in quote_rows}
+        buckets = sorted(
+            set(quotes_by_bucket) | {r["bucket_us"] for r in trade_rows}
+        )
+        trades_by_bucket = {r["bucket_us"]: r for r in trade_rows}
+        rows = []
+        for b in buckets:
+            t = trades_by_bucket.get(b, {})
+            q = quotes_by_bucket.get(b, {})
+            rows.append([
+                b,
+                t.get("trades", 0),
+                t.get("volume", 0),
+                round(t["vwap"], 4) if t.get("vwap") is not None else None,
+                t.get("upticks", 0),
+                t.get("downticks", 0),
+                t.get("block_trades", 0),
+                t.get("low"),
+                t.get("high"),
+                q.get("quotes", 0),
+                round(q["spread_bps"], 2) if q.get("spread_bps") is not None else None,
+                round(q["bid_fraction"], 3) if q.get("bid_fraction") is not None else None,
+            ])
+        return {
+            "symbol": symbol,
+            "bucket_seconds": bucket_seconds,
+            "block_size": block_size,
+            "columns": [
+                "ts_us", "trades", "volume", "vwap", "upticks", "downticks",
+                "block_trades", "low", "high", "quotes", "spread_bps",
+                "bid_fraction",
+            ],
+            "buckets": rows,
+            "count": len(rows),
+        }
+
+    @mcp.tool(
+        description=(
+            "One aggregate row per watchlist symbol over the past `minutes`: "
+            "last price, change %, volume, trade count, average spread (bps), "
+            "halted flag. 'What is my watchlist doing right now' in one "
+            "bounded call. Rows: [symbol, last, chg_pct, volume, trades, "
+            "spread_bps, halted]."
+        )
+    )
+    async def get_watchlist_pulse(
+        minutes: int = 5, symbols: list[str] | None = None
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        parts = _market_parts(app)
+        if parts is None:
+            return _stream_disabled()
+        stream, market_store = parts
+        if minutes > MAX_WINDOW_MINUTES:
+            return _limit_exceeded(MAX_WINDOW_MINUTES, minutes)
+        wanted = symbols or stream.watchlist()
+        if len(wanted) > MAX_LATEST_SYMBOLS:
+            return _limit_exceeded(MAX_LATEST_SYMBOLS, len(wanted))
+        pulse = await market_store.watchlist_pulse(
+            wanted, since_us=_minutes_ago_us(max(1, minutes))
+        )
+        rows = []
+        for sym in sorted(pulse):
+            entry = pulse[sym]
+            first = entry.get("first_price")
+            last = entry.get("last_price")
+            chg = None
+            if first and last is not None:
+                chg = round((last - first) / first * 100.0, 2)
+            status = (market_store.snapshots.get(sym) or {}).get("status") or {}
+            rows.append([
+                sym, last, chg, entry.get("volume"), entry.get("trades"),
+                entry.get("spread_bps"), status.get("sc") == "H",
+            ])
+        return {
+            "window_minutes": minutes,
+            "columns": [
+                "symbol", "last", "chg_pct", "volume", "trades", "spread_bps",
+                "halted",
+            ],
+            "rows": rows,
+            "count": len(rows),
+        }
+
+    @mcp.tool(
+        description=(
+            "Discovery: market movers + most-actives fused with what this "
+            "server already knows — local news count, halt status, and "
+            "watchlist membership per candidate. Use it to find symbols "
+            "worth adding to the watchlist."
+        )
+    )
+    async def get_market_pulse(
+        top: int = 10, news_minutes: int = 120
+    ) -> dict[str, Any]:
+        app = get_app_state()
+        if app.market_client is None:
+            return _client_unavailable()
+        if top > MAX_PULSE_TOP:
+            return _limit_exceeded(MAX_PULSE_TOP, top)
+        top = max(1, top)
+        movers = await app.market_client.movers(top=top)
+        actives = await app.market_client.most_actives(by="volume", top=top)
+        if movers is None and actives is None:
+            return _upstream_error()
+        candidates: dict[str, dict[str, Any]] = {}
+
+        def _add(entry: dict[str, Any], source: str) -> None:
+            sym = str(entry.get("symbol") or "").upper()
+            if not sym:
+                return
+            existing = candidates.setdefault(sym, {"symbol": sym, "sources": []})
+            existing["sources"].append(source)
+            if "price" in entry:
+                existing["price"] = entry.get("price")
+            if "percent_change" in entry:
+                existing["percent_change"] = entry.get("percent_change")
+            if "volume" in entry:
+                existing["volume"] = entry.get("volume")
+
+        for g in (movers or {}).get("gainers") or []:
+            _add(g, "gainer")
+        for loser in (movers or {}).get("losers") or []:
+            _add(loser, "loser")
+        for a in (actives or {}).get("most_actives") or []:
+            _add(a, "most_active")
+
+        news_counts = await app.store.symbol_map(
+            minutes=max(1, news_minutes), min_articles=1, limit=500
+        )
+        watch = set(app.stock_stream.watchlist()) if app.stock_stream else set()
+        halted: set[str] = set()
+        if app.market_store is not None and candidates:
+            statuses = await app.market_store.recent_statuses(
+                minutes=240, symbols=list(candidates)[:50], limit=200
+            )
+            latest_status: dict[str, str] = {}
+            for st in statuses:  # newest first
+                latest_status.setdefault(st["symbol"], st.get("status_code") or "")
+            halted = {s for s, code in latest_status.items() if code == "H"}
+
+        rows = []
+        for sym, entry in candidates.items():
+            rows.append({
+                **entry,
+                "news_count": news_counts.get(sym, 0),
+                "halted": sym in halted,
+                "on_watchlist": sym in watch,
+            })
+        rows.sort(
+            key=lambda r: (
+                abs(r.get("percent_change") or 0.0),
+                r.get("volume") or 0,
+            ),
+            reverse=True,
+        )
+        return {
+            "candidates": rows,
+            "count": len(rows),
+            "news_window_minutes": news_minutes,
+            "as_of": datetime.now(UTC).isoformat(),
+        }
 
     # ---- REST market context (works even with the stock stream disabled) ---------------
 
