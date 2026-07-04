@@ -27,7 +27,7 @@ from . import market_tools as market_tools_mod
 from . import poll_tools as poll_tools_mod
 from . import resources as resources_mod
 from . import tools as tools_mod
-from .alerts import AlertEngine
+from .alerts import AlertEngine, clean_keyword_overrides
 from .app_state import AppState, clear_app_state, get_app_state, set_app_state
 from .config import Config
 from .logging_utils import configure_logging, get_logger
@@ -60,6 +60,25 @@ async def app_setup(config: Config) -> AsyncIterator[AppState]:
         keywords_file=config.alert_keywords_file or None,
         rate_limit_per_symbol_hour=config.alert_rate_limit_per_symbol_hour,
     )
+    # Restore bot-managed runtime state (keyword groups, watched stories).
+    persisted_overrides = await store.get_status(
+        tools_mod.ALERT_KEYWORD_OVERRIDES_KEY
+    )
+    if persisted_overrides:
+        alerts.rebuild(
+            clean_keyword_overrides(
+                persisted_overrides, source="persisted keyword overrides"
+            )
+        )
+    persisted_watches = await store.get_status(tools_mod.WATCHED_STORIES_KEY)
+    if persisted_watches and isinstance(persisted_watches.get("articles"), dict):
+        state_watches: dict[int, str] = {}
+        for key, value in persisted_watches["articles"].items():
+            try:
+                state_watches[int(key)] = str(value)
+            except (TypeError, ValueError):
+                continue
+        state.restore_watched_articles(state_watches)
     rest_backfill = RestBackfillWorker(config, store, state, alerts)
     NewsStreamWorker.reset_singleton()
     stream = NewsStreamWorker(

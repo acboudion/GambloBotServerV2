@@ -6,7 +6,7 @@ only). No tool ever opens an Alpaca WebSocket — they all read from the local s
 
 from __future__ import annotations
 
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from dateutil import parser as dateparser
@@ -61,6 +61,13 @@ MAX_INTEREST_SYMBOLS = 200
 MAX_SYMBOL_MAP_DEFAULT = 100
 MAX_SYMBOL_MAP_HARD = 500
 MAX_SYMBOL_MAP_MINUTES = 10_080  # 7 days
+MAX_KEYWORD_GROUPS = 50
+MAX_PHRASES_PER_LIST = 100
+MAX_PHRASE_CHARS = 200
+
+# stream_status keys for bot-managed runtime state (restored at startup).
+ALERT_KEYWORD_OVERRIDES_KEY = "alert_keyword_overrides"
+WATCHED_STORIES_KEY = "watched_stories"
 
 
 def _filter_over_cap(values: list[str] | None) -> dict[str, Any] | None:
@@ -579,6 +586,173 @@ def register(mcp: FastMCP) -> None:
         if clamped:
             out["clamped_to_minutes"] = minutes
         return out
+
+    # ---- Runtime news watches (keyword groups + story follows) --------------
+
+    @mcp.tool(
+        description=(
+            "Create or replace a runtime alert keyword group — retarget the "
+            "news radar without a restart (e.g. after entering a biotech "
+            "position, add FDA/PDUFA/CRL phrases). Matching articles emit "
+            "alerts (category custom_keyword for new groups, the native "
+            "category when extending a built-in group like mna/earnings). "
+            "critical_phrases escalate severity to critical; bullish/bearish "
+            "extend direction tagging. Persists across restarts."
+        )
+    )
+    async def set_alert_keyword_group(
+        group: str,
+        phrases: list[str],
+        critical_phrases: list[str] | None = None,
+        bullish: list[str] | None = None,
+        bearish: list[str] | None = None,
+    ) -> dict[str, Any]:
+        group = group.strip().lower()
+        if not group or len(group) > 64:
+            return _err("invalid_group", "group must be 1-64 characters", group=group)
+        spec_lists = {
+            "phrases": phrases,
+            "critical_phrases": critical_phrases or [],
+            "bullish": bullish or [],
+            "bearish": bearish or [],
+        }
+        for key, values in spec_lists.items():
+            if len(values) > MAX_PHRASES_PER_LIST:
+                return _limit_exceeded(MAX_PHRASES_PER_LIST, len(values))
+            if any(len(str(v)) > MAX_PHRASE_CHARS for v in values):
+                return _err(
+                    "phrase_too_long",
+                    f"keep phrases under {MAX_PHRASE_CHARS} characters",
+                    field=key,
+                )
+        cleaned = {
+            key: [str(v).strip().lower() for v in values if str(v).strip()]
+            for key, values in spec_lists.items()
+        }
+        if not cleaned["phrases"] and not cleaned["critical_phrases"]:
+            return _err(
+                "no_phrases", "pass at least one phrase or critical phrase"
+            )
+        app = get_app_state()
+        existing = app.alerts.runtime_keyword_groups()
+        if group not in existing and len(existing) >= MAX_KEYWORD_GROUPS:
+            return _limit_exceeded(MAX_KEYWORD_GROUPS, len(existing) + 1)
+        app.alerts.set_runtime_group(group, cleaned)
+        await app.store.set_status(
+            ALERT_KEYWORD_OVERRIDES_KEY, app.alerts.runtime_keyword_groups()
+        )
+        summary = app.alerts.keyword_group_summary().get(group, {})
+        return {
+            "group": group,
+            "category": summary.get("category"),
+            "phrases": summary.get("phrases", []),
+            "persisted": True,
+        }
+
+    @mcp.tool(
+        description=(
+            "Delete a runtime alert keyword group. Deleting an override of a "
+            "built-in group (mna, earnings, ...) reverts it to its built-in "
+            "phrases; built-ins themselves cannot be deleted."
+        )
+    )
+    async def delete_alert_keyword_group(group: str) -> dict[str, Any]:
+        app = get_app_state()
+        group = group.strip().lower()
+        if not app.alerts.delete_runtime_group(group):
+            return _err(
+                "not_found",
+                "no runtime group with this name (built-ins cannot be "
+                "deleted; see get_alert_keyword_groups)",
+                group=group,
+            )
+        await app.store.set_status(
+            ALERT_KEYWORD_OVERRIDES_KEY, app.alerts.runtime_keyword_groups()
+        )
+        return {"deleted": group}
+
+    @mcp.tool(
+        description=(
+            "All effective alert keyword groups: built-in and runtime, the "
+            "alert category each maps to, and every matchable phrase."
+        )
+    )
+    async def get_alert_keyword_groups() -> dict[str, Any]:
+        app = get_app_state()
+        return {"groups": app.alerts.keyword_group_summary()}
+
+    @mcp.tool(
+        description=(
+            "Follow a developing story (max 50): future content updates to "
+            "this article emit a high-severity watched_story_update alert "
+            "into the alert feed. Persists across restarts."
+        )
+    )
+    async def watch_story(article_id: int) -> dict[str, Any]:
+        app = get_app_state()
+        article = await app.store.get_article(article_id)
+        if article is None:
+            return _err(
+                "not_found",
+                "no article with this Alpaca id is stored locally",
+                article_id=article_id,
+            )
+        if not app.state.watch_article(
+            article_id, datetime.now(UTC).isoformat()
+        ):
+            return _limit_exceeded(50, len(app.state.get_watched_articles()) + 1)
+        await app.store.set_status(
+            WATCHED_STORIES_KEY,
+            {
+                "articles": {
+                    str(k): v for k, v in app.state.get_watched_articles().items()
+                }
+            },
+        )
+        return {
+            "watching": article_id,
+            "headline": article.headline,
+            "update_count": article.update_count,
+        }
+
+    @mcp.tool(description="Stop following a watched story.")
+    async def unwatch_story(article_id: int) -> dict[str, Any]:
+        app = get_app_state()
+        removed = app.state.unwatch_article(article_id)
+        if removed:
+            await app.store.set_status(
+                WATCHED_STORIES_KEY,
+                {
+                    "articles": {
+                        str(k): v
+                        for k, v in app.state.get_watched_articles().items()
+                    }
+                },
+            )
+        return {"unwatched": removed, "article_id": article_id}
+
+    @mcp.tool(description="Currently watched stories with their latest state.")
+    async def get_watched_stories() -> dict[str, Any]:
+        app = get_app_state()
+        watched = app.state.get_watched_articles()
+        stories = []
+        for article_id, watched_at in sorted(watched.items()):
+            article = await app.store.get_article(article_id)
+            entry: dict[str, Any] = {
+                "article_id": article_id,
+                "watched_at": watched_at,
+            }
+            if article is not None:
+                entry.update(
+                    headline=article.headline,
+                    update_count=article.update_count,
+                    updated_at=article.updated_at,
+                    symbols=list(article.symbols),
+                )
+            else:
+                entry["note"] = "article pruned by retention"
+            stories.append(entry)
+        return {"count": len(stories), "stories": stories}
 
     # ---- Diagnostics -------------------------------------------------------
 

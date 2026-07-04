@@ -25,6 +25,7 @@ AlertCategory = Literal[
     "gap_fill_failure",
     "coverage_gap",
     "persist_failure",
+    "watched_story_update",
     "trading_halt",
     "trading_resume",
     "luld",

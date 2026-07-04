@@ -442,7 +442,9 @@ class NewsStreamWorker(BaseStreamWorker):
             async with self._store.batch_writer() as writer:
                 for normalized in normalized_items:
                     result = await writer.upsert_article(normalized, source_kind="ws")
-                    pending_articles.append((result.article, result.was_new))
+                    pending_articles.append(
+                        (result.article, result.was_new, result.version_inserted)
+                    )
                     if result.was_new or result.version_inserted:
                         for alert in self._alerts.evaluate_article(
                             result.article, interest_symbols=interest
@@ -468,10 +470,24 @@ class NewsStreamWorker(BaseStreamWorker):
         # past articles that never reached SQLite — permanently skipping them
         # on the next gap-fill. Alert quota/state likewise.
         self._alerts.commit_pending()
-        for article, was_new in pending_articles:
+        for article, was_new, _ in pending_articles:
             self._state.record_article(article, was_new=was_new)
         for alert in pending_alerts:
             self._state.record_alert(alert)
+        # Watched-story updates fire after the commit (their alerts use their
+        # own short transactions and must reference committed content).
+        watched = self._state.get_watched_articles()
+        if watched:
+            for article, was_new, version_inserted in pending_articles:
+                if was_new or not version_inserted or article.id not in watched:
+                    continue
+                alert = self._alerts.watched_story_alert(article)
+                try:
+                    inserted = await self._store.record_alert(alert, raw_json="{}")
+                    if inserted:
+                        self._state.record_alert(alert)
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("failed to record watched_story_update alert")
 
     @staticmethod
     def _normalize_payloads(

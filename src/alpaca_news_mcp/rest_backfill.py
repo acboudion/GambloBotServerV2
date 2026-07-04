@@ -296,6 +296,15 @@ class RestBackfillWorker:
                 if inserted:
                     self._alerts.count_emission(alert)
                     self._state.record_alert(alert)
+            if (
+                result.version_inserted
+                and not result.was_new
+                and result.article.id in self._state.get_watched_articles()
+            ):
+                watch_alert = self._alerts.watched_story_alert(result.article)
+                inserted = await self._store.record_alert(watch_alert, raw_json="{}")
+                if inserted:
+                    self._state.record_alert(watch_alert)
         if result.was_new:
             return "new"
         if result.version_inserted:

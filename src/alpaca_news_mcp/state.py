@@ -15,6 +15,8 @@ from .models import Alert, NewsArticle, StreamHealth, SubscriptionState
 NEWS_STREAM = "news"
 STOCK_STREAM = "stocks"
 
+MAX_WATCHED_STORIES = 50
+
 # Health fields written on the per-message hot path. They live in a plain
 # dict instead of the pydantic model: a full model_dump + model_validate per
 # tick (the model carries the whole subscription mapping) is real overhead
@@ -31,6 +33,8 @@ class State:
     last_seen_updated_at: str | None = None
     article_count: int = 0
     alert_count: int = 0
+    # article_id -> watched_at ISO (bot-managed "follow this story" set)
+    watched_articles: dict[int, str] = field(default_factory=dict)
 
     _lock: RLock = field(default_factory=RLock)
     _hot: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -66,6 +70,31 @@ class State:
             hot = self._hot[stream]
             hot["articles_dropped"] = int(hot.get("articles_dropped") or 0) + 1
             return int(hot["articles_dropped"])
+
+    def watch_article(self, article_id: int, watched_at: str) -> bool:
+        """Track a developing story. Returns False when the cap is hit."""
+        with self._lock:
+            if (
+                article_id not in self.watched_articles
+                and len(self.watched_articles) >= MAX_WATCHED_STORIES
+            ):
+                return False
+            self.watched_articles.setdefault(article_id, watched_at)
+            return True
+
+    def unwatch_article(self, article_id: int) -> bool:
+        with self._lock:
+            return self.watched_articles.pop(article_id, None) is not None
+
+    def get_watched_articles(self) -> dict[int, str]:
+        with self._lock:
+            return dict(self.watched_articles)
+
+    def restore_watched_articles(self, articles: dict[int, str]) -> None:
+        with self._lock:
+            self.watched_articles = dict(
+                list(articles.items())[:MAX_WATCHED_STORIES]
+            )
 
     def set_interest_symbols(self, symbols: list[str], mode: str) -> set[str]:
         normalized = {s.strip().upper() for s in symbols if s and s.strip()}
