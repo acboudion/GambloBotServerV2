@@ -7,7 +7,9 @@ import sqlite3
 import aiosqlite
 import pytest
 
+from alpaca_news_mcp.market_store import MarketStore
 from alpaca_news_mcp.migrations import (
+    MARKET_MIGRATIONS,
     NEWS_MIGRATIONS,
     get_user_version,
     migrate,
@@ -178,3 +180,33 @@ async def test_m5_backfills_alert_seq_in_rowid_order(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_alerts_seq'"
         )
         assert await cur.fetchone() is not None
+
+
+@pytest.mark.asyncio
+async def test_market_migration_creates_status_table_and_is_idempotent(tmp_path):
+    """A market DB from before market_status existed gets the table through
+    the versioned migration chain, not just schema-file IF NOT EXISTS."""
+    path = str(tmp_path / "market_old.sqlite")
+    sqlite3.connect(path).close()  # pre-existing empty DB, user_version 0
+    async with aiosqlite.connect(path) as conn:
+        conn.row_factory = aiosqlite.Row
+        assert await get_user_version(conn) == 0
+        version = await migrate(conn, MARKET_MIGRATIONS)
+        assert version == MARKET_MIGRATIONS[-1][0]
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='market_status'"
+        )
+        assert await cur.fetchone() is not None
+        assert await migrate(conn, MARKET_MIGRATIONS) == version
+
+
+@pytest.mark.asyncio
+async def test_market_store_init_schema_stamps_user_version(tmp_path):
+    """init_schema must leave a versioned record that the market schema
+    steps ran — future upgrades key off PRAGMA user_version."""
+    store = await MarketStore.open(str(tmp_path / "market.sqlite"))
+    try:
+        await store.init_schema()
+        assert await get_user_version(store.conn) == MARKET_MIGRATIONS[-1][0]
+    finally:
+        await store.close()

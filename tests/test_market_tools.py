@@ -465,6 +465,26 @@ async def test_get_symbol_context_scalars(app):
 
 
 @pytest.mark.asyncio
+async def test_symbol_context_halted_from_retained_status_rows(app):
+    """Same restart-mid-halt scenario as the pulse tools: a halt that exists
+    only in stock_statuses (empty snapshot cache) must still flip the
+    context's halted flag — the context block must not present a
+    non-tradable name as tradable."""
+    now = datetime.now(UTC)
+    now_min = int(now.timestamp()) // 60 * 60
+    now_us = int(now.timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(
+        bars=[("AAPL", "1min", now_min - 60, 100.0, 101.0, 99.5, 100.5,
+               1000, 10, 100.2)],
+        statuses=[("AAPL", now_us - 2_000_000, "H", "Trading Halt", "T1",
+                   "News Pending", "C")],
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_symbol_context", symbols=["AAPL"])
+    assert out["symbols"]["AAPL"]["halted"] is True
+
+
+@pytest.mark.asyncio
 async def test_get_stock_bars_aggregated_timeframes(app):
     now_min = int(datetime.now(UTC).timestamp()) // 300 * 300
     rows = [("AAPL", "1min", now_min + i * 60, 1.0 + i, 2.0 + i, 0.5,

@@ -135,6 +135,29 @@ def _iso_ts_to_us(value: Any) -> int | None:
     return int(dt.timestamp() * 1_000_000)
 
 
+async def _retained_halted_symbols(
+    app: AppState, market_store: Any, symbols: list[str]
+) -> set[str]:
+    """Symbols whose newest retained stock_statuses row is a halt.
+
+    The in-memory snapshot cache misses halts that predate this process
+    (restart mid-halt) or symbols added after their halt event, so halt
+    flags must union the cache with these retained rows. The window spans
+    the full status retention: news-pending and regulatory halts routinely
+    outlive a 4-hour slice, and the newest retained status per symbol is
+    the current state. Chunked so every symbol gets a real check.
+    """
+    latest: dict[str, str] = {}
+    window_minutes = app.config.status_retention_days * 1440
+    for i in range(0, len(symbols), 50):
+        statuses = await market_store.recent_statuses(
+            minutes=window_minutes, symbols=symbols[i : i + 50], limit=500
+        )
+        for st in statuses:  # newest first per chunk
+            latest.setdefault(st["symbol"], st.get("status_code") or "")
+    return {s for s, code in latest.items() if code == "H"}
+
+
 async def _rest_bars_fallback(
     app: AppState,
     symbol: str,
@@ -701,9 +724,10 @@ def register(mcp: FastMCP) -> None:
         now = datetime.now(UTC)
         now_ts = int(now.timestamp())
         today_midnight = now_ts - (now_ts % 86_400)
+        cleaned = [s.strip().upper() for s in symbols]
+        db_halted = await _retained_halted_symbols(app, market_store, cleaned)
         out: dict[str, Any] = {}
-        for raw_sym in symbols:
-            sym = raw_sym.strip().upper()
+        for sym in cleaned:
             minute_bars = await market_store.bars_window(
                 sym, timeframe="1min", start_ts=now_ts - 8 * 3600, limit=MAX_BARS
             )
@@ -766,7 +790,7 @@ def register(mcp: FastMCP) -> None:
                     volume_today, prior_volumes, len(minute_bars) / 390.0
                 ),
                 "minute_bars_used": len(minute_bars),
-                "halted": status.get("sc") == "H" if status else False,
+                "halted": sym in db_halted or status.get("sc") == "H",
             }
             out[sym] = entry
         return {"symbols": out, "as_of": now.isoformat()}
@@ -875,19 +899,7 @@ def register(mcp: FastMCP) -> None:
         pulse = await market_store.watchlist_pulse(
             wanted, since_us=_minutes_ago_us(max(1, minutes))
         )
-        # The snapshot cache misses halts that predate this process (restart
-        # mid-halt) or symbols added after their halt event; the retained
-        # stock_statuses rows keep the latest state, so union both sources.
-        latest_status: dict[str, str] = {}
-        if pulse:
-            statuses = await market_store.recent_statuses(
-                minutes=app.config.status_retention_days * 1440,
-                symbols=list(pulse),
-                limit=500,
-            )
-            for st in statuses:  # newest first
-                latest_status.setdefault(st["symbol"], st.get("status_code") or "")
-        db_halted = {s for s, code in latest_status.items() if code == "H"}
+        db_halted = await _retained_halted_symbols(app, market_store, list(pulse))
         rows = []
         for sym in sorted(pulse):
             entry = pulse[sym]
@@ -961,26 +973,10 @@ def register(mcp: FastMCP) -> None:
         watch = set(app.stock_stream.watchlist()) if app.stock_stream else set()
         halted: set[str] = set()
         if app.market_store is not None and candidates:
-            # gainers + losers + most-actives can exceed one query's symbol
-            # cap; chunk so EVERY candidate gets a real halt check — a
-            # discovery tool must never present a halted name as tradable.
-            # The window spans the full status retention: news-pending and
-            # regulatory halts routinely outlive a 4-hour slice, and the
-            # newest retained status per symbol is the current state.
-            status_window_minutes = app.config.status_retention_days * 1440
-            latest_status: dict[str, str] = {}
-            all_candidates = list(candidates)
-            for i in range(0, len(all_candidates), 50):
-                statuses = await app.market_store.recent_statuses(
-                    minutes=status_window_minutes,
-                    symbols=all_candidates[i : i + 50],
-                    limit=500,
-                )
-                for st in statuses:  # newest first per chunk
-                    latest_status.setdefault(
-                        st["symbol"], st.get("status_code") or ""
-                    )
-            halted = {s for s, code in latest_status.items() if code == "H"}
+            # A discovery tool must never present a halted name as tradable.
+            halted = await _retained_halted_symbols(
+                app, app.market_store, list(candidates)
+            )
 
         rows = []
         for sym, entry in candidates.items():

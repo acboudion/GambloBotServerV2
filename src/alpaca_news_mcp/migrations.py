@@ -137,6 +137,24 @@ NEWS_MIGRATIONS: list[tuple[int, Migration]] = [
 ]
 
 
+async def _mm1_market_status(conn: aiosqlite.Connection) -> None:
+    """Key/value status table (bar-seq allocation high-water mark)."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_status (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+MARKET_MIGRATIONS: list[tuple[int, Migration]] = [
+    (1, _mm1_market_status),
+]
+
+
 async def migrate(
     conn: aiosqlite.Connection,
     migrations: list[tuple[int, Migration]],

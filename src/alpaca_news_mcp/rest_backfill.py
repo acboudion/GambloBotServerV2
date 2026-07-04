@@ -128,13 +128,18 @@ class RestBackfillWorker:
         """Symbol-scoped deep fetch (bot-triggered, e.g. evaluating an
         unfamiliar ticker). Shares _run_lock with startup/gap-fill runs;
         bounded to max_articles (<= ~10 pages), so it holds the lock for
-        seconds, not minutes."""
+        seconds, not minutes.
+
+        Pages newest-first: when the window holds more than max_articles,
+        the cap must keep the recent catalysts the bot is evaluating, not
+        the oldest articles in the window."""
         start = datetime.now(UTC) - timedelta(days=days)
         return await self._run(
             start_iso=start.isoformat(),
             reason="history",
             symbols=symbols,
             max_items=max_articles,
+            sort="desc",
         )
 
     async def _run(
@@ -145,6 +150,7 @@ class RestBackfillWorker:
         raise_on_failure: bool = False,
         symbols: list[str] | None = None,
         max_items: int | None = None,
+        sort: str = "asc",
     ) -> dict[str, Any]:
         if self._run_lock.locked():
             log.info("rest_backfill already running; skipping reason=%s", reason)
@@ -160,9 +166,12 @@ class RestBackfillWorker:
         failure: str | None = None
         async with self._run_lock:
             client = await self._ensure_client()
+            # asc for watermark-driven runs (startup/gap-fill walk forward
+            # from a start time); desc for capped history fetches, where the
+            # item budget must keep the newest articles.
             params: dict[str, Any] = {
                 "start": start_iso,
-                "sort": "asc",
+                "sort": sort,
                 "limit": 50,
             }
             if symbols:

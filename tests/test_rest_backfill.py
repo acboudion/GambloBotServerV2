@@ -425,7 +425,28 @@ async def test_history_fetch_scopes_symbols_and_caps_items(wired):
         result = await worker.history(symbols=["xbio"], days=90, max_articles=2)
 
     assert seen_params[0]["symbols"] == "XBIO"
+    # Newest-first: when the window holds more than max_articles, the cap
+    # must keep the recent catalysts, not the oldest articles in the window.
+    assert seen_params[0]["sort"] == "desc"
     assert result["truncated"] is True
     assert result["failure"] is None
     assert result["new"] + result["updated"] + result["duplicate"] == 2
     assert (await store.get_article(9000)) is not None
+
+
+@pytest.mark.asyncio
+async def test_watermark_runs_still_page_ascending(wired):
+    """startup/gap-fill/manual walk forward from a start watermark; only the
+    capped history fetch pages descending."""
+    worker, _store, _state, _ = wired
+    seen_params = []
+
+    def responder(request):
+        seen_params.append(dict(request.url.params))
+        return httpx.Response(200, json={"news": [], "next_page_token": None})
+
+    with respx.mock(base_url="https://data.alpaca.example") as mock:
+        mock.get("/v1beta1/news").mock(side_effect=responder)
+        await worker.manual(30)
+
+    assert seen_params[0]["sort"] == "asc"

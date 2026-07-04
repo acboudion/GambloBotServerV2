@@ -20,6 +20,7 @@ from typing import Any
 import aiosqlite
 
 from .logging_utils import get_logger
+from .migrations import MARKET_MIGRATIONS, migrate
 from .store import open_read_connection
 
 log = get_logger(__name__)
@@ -126,6 +127,7 @@ class MarketStore:
         async with self._write_lock:
             await self.conn.executescript(sql_text)
             await self.conn.commit()
+            await migrate(self.conn, MARKET_MIGRATIONS)
             cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM stock_bars")
             row = await cur.fetchone()
             await cur.close()
