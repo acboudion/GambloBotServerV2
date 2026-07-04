@@ -10,6 +10,7 @@ Severity = Literal["critical", "high", "medium", "low"]
 AlertCategory = Literal[
     "held_or_interested_symbol",
     "breaking_keyword",
+    "custom_keyword",
     "corporate_action_keyword",
     "earnings_keyword",
     "analyst_keyword",

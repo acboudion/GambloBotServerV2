@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from pydantic import ValidationError
 
 from .logging_utils import get_logger
 from .migrations import NEWS_MIGRATIONS, migrate
@@ -1079,21 +1080,34 @@ class Store:
         cur = await self.rconn.execute(sql, params)
         rows = await cur.fetchall()
         await cur.close()
-        return [
-            Alert(
-                alert_id=r["alert_id"],
-                article_id=r["article_id"],
-                created_at=r["created_at"],
-                severity=r["severity"],
-                category=r["category"],
-                symbols=json.loads(r["symbols_json"] or "[]"),
-                headline=r["headline"],
-                reason=r["reason"],
-                acknowledged=bool(r["acknowledged"]),
-                direction=(r["direction"] if "direction" in r.keys() else None) or "neutral",
-            )
-            for r in rows
-        ]
+        out: list[Alert] = []
+        for r in rows:
+            try:
+                out.append(
+                    Alert(
+                        alert_id=r["alert_id"],
+                        article_id=r["article_id"],
+                        created_at=r["created_at"],
+                        severity=r["severity"],
+                        category=r["category"],
+                        symbols=json.loads(r["symbols_json"] or "[]"),
+                        headline=r["headline"],
+                        reason=r["reason"],
+                        acknowledged=bool(r["acknowledged"]),
+                        direction=(r["direction"] if "direction" in r.keys() else None)
+                        or "neutral",
+                    )
+                )
+            except ValidationError:
+                # Rows written by a newer build can carry categories this
+                # build's Literal doesn't know — skip them instead of failing
+                # the whole read after a downgrade.
+                log.warning(
+                    "skipping alert %s with unknown category %r",
+                    r["alert_id"],
+                    r["category"],
+                )
+        return out
 
     async def latency_stats(self, minutes: int) -> LatencyStats:
         since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()

@@ -24,6 +24,7 @@ MAX_VERSIONS_HARD = 200
 MAX_CONTENT_CHARS = 4000
 MAX_CURSOR_ITEMS = 500
 MAX_SYMBOLS_PER_LOOKUP = 50
+MAX_INTEREST_SYMBOLS = 200
 
 VALID_FIELD_MODES = ("compact", "standard", "full")
 
@@ -420,13 +421,18 @@ def register(mcp: FastMCP) -> None:
     # ---- Symbol & alert tools ---------------------------------------------
 
     @mcp.tool(
-        description="Update local interest-symbol filters. mode: replace|add|remove|clear."
+        description=(
+            "Update local interest-symbol filters (max 200 symbols). "
+            "mode: replace|add|remove|clear."
+        )
     )
     async def set_interest_symbols(
         symbols: list[str], mode: str = "replace"
     ) -> dict[str, Any]:
         if mode not in ("replace", "add", "remove", "clear"):
             return {"error": "invalid_mode", "mode": mode}
+        if len(symbols) > MAX_INTEREST_SYMBOLS:
+            return _limit_exceeded(MAX_INTEREST_SYMBOLS, len(symbols))
         app = get_app_state()
         if mode == "clear":
             symbols = []
