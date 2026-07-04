@@ -592,6 +592,12 @@ class StockStreamWorker(BaseStreamWorker):
             lulds=rows["lulds"] or None,
             raw_events=rows["raw"] or None,
         )
+        # Quote-sample bucket state commits only AFTER the transaction
+        # succeeded: advancing it during row shaping would make the
+        # persister's retry of a failed batch see the buckets as already
+        # emitted and silently drop the sampled quotes.
+        if rows["quote_buckets"]:
+            self._last_quote_bucket.update(rows["quote_buckets"])
         self._update_snapshots(batch)
         await self._emit_market_alerts(rows["status_items"], rows["luld_items"])
         # Derived price/volume alerts run on bar events only (~1 event per
@@ -715,6 +721,10 @@ class StockStreamWorker(BaseStreamWorker):
         # the true latest regardless). Keep the last quote per symbol per
         # sample bucket, remembering buckets ACROSS batches — small drains
         # would otherwise store one quote per batch instead of one per bucket.
+        # This method only READS _last_quote_bucket; the candidate updates go
+        # back via quote_buckets and are committed by persist_batch after the
+        # transaction succeeds, so a retried batch keeps its quotes.
+        quote_buckets: dict[str, int] = {}
         sample_ms = self._config.stock_quote_sample_ms
         if sample_ms > 0 and quotes:
             bucketed: dict[tuple[str, int], tuple[Any, ...]] = {}
@@ -724,7 +734,7 @@ class StockStreamWorker(BaseStreamWorker):
             for (sym, bucket), q in sorted(bucketed.items()):
                 if self._last_quote_bucket.get(sym) == bucket:
                     continue
-                self._last_quote_bucket[sym] = bucket
+                quote_buckets[sym] = bucket  # sorted: ends at the max bucket
                 kept.append(q)
             quotes = kept
 
@@ -738,6 +748,7 @@ class StockStreamWorker(BaseStreamWorker):
             "status_items": status_items,
             "luld_items": luld_items,
             "bar_items": bar_items,
+            "quote_buckets": quote_buckets,
         }
 
     def _update_snapshots(self, batch: list[tuple[str, dict[str, Any]]]) -> None:

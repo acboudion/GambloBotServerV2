@@ -922,3 +922,40 @@ async def test_configurable_watchlist_cap(wired, monkeypatch):
         assert out["max_allowed"] == 3
     finally:
         StockStreamWorker.reset_singleton()
+
+
+@pytest.mark.asyncio
+async def test_quote_sample_state_survives_failed_persist(wired, monkeypatch):
+    """Bucket state must commit only after the transaction succeeds — the
+    persister retries a failed batch, and a pre-committed bucket would make
+    the retry silently drop the sampled quotes."""
+    cfg, store, market_store, state, alerts = wired
+    cfg2 = replace(cfg, stock_quote_sample_ms=1000)
+    worker = _worker(cfg2, store, market_store, state, alerts)
+    try:
+        batch = [("q", _quote("AAPL", ts="2026-04-28T15:40:00.100Z"))]
+        real = market_store.persist_stream_batch
+        calls = {"n": 0}
+
+        async def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("SQLITE_BUSY")
+            await real(**kwargs)
+
+        monkeypatch.setattr(market_store, "persist_stream_batch", flaky)
+        with pytest.raises(RuntimeError):
+            await worker.persist_batch(batch)
+        # Retry of the SAME batch must still persist the quote.
+        await worker.persist_batch(batch)
+        since = _to_epoch_us("2026-04-28T15:39:00Z")
+        rows = await market_store.quotes_window("AAPL", since_us=since, limit=10)
+        assert len(rows) == 1
+        # And the committed state now dedups the next batch in-bucket.
+        await worker.persist_batch(
+            [("q", _quote("AAPL", ts="2026-04-28T15:40:00.900Z"))]
+        )
+        rows = await market_store.quotes_window("AAPL", since_us=since, limit=10)
+        assert len(rows) == 1
+    finally:
+        StockStreamWorker.reset_singleton()

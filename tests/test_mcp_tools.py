@@ -452,3 +452,59 @@ async def test_recent_news_limit_zero_means_default(app):
         await _ingest(app.store, 200 + i, f"headline {i}")
     out = await _call(mcp, "get_recent_news", minutes=60, limit=0)
     assert out["count"] == 50  # MAX_ARTICLES_DEFAULT, not 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_news_history_rejects_blank_symbols(app):
+    """A blanks-only list must not reach the backfill worker as [] — that
+    would fetch unfiltered market-wide news for the whole window."""
+    mcp = build_mcp()
+    out = await _call(mcp, "fetch_news_history", symbols=["  ", ""])
+    assert out["error"] == "no_symbols"
+    # Dedup happens before the count cap: 6 blanks+dupes of one symbol pass.
+    out = await _call(
+        mcp, "fetch_news_history",
+        symbols=["AAPL", "aapl ", " AAPL", "", "  ", "AAPL"],
+        days=400,  # fails on days AFTER symbol cleaning passed
+    )
+    assert out["error"] == "invalid_days"
+
+
+@pytest.mark.asyncio
+async def test_breaking_digest_scans_beyond_response_size(app):
+    """breaking_matches=false claims NOTHING breaking happened — a breaking
+    article ranked below the newest max_articles routine ones must still be
+    found."""
+    mcp = build_mcp()
+    # One breaking article, OLDER than a pile of routine ones.
+    await _ingest(
+        app.store, 500, "Trading halted in XYZ pending news",
+        created_at="2026-07-04T10:00:00Z", updated_at="2026-07-04T10:00:00Z",
+    )
+    for i in range(30):
+        await _ingest(
+            app.store, 600 + i, f"Routine market note {i}",
+            created_at=f"2026-07-04T11:{i:02d}:00Z",
+            updated_at=f"2026-07-04T11:{i:02d}:00Z",
+        )
+    out = await _call(
+        mcp, "get_breaking_news_digest", minutes=60 * 24 * 365, max_articles=5
+    )
+    assert out["breaking_matches"] is True
+    assert [a["id"] for a in out["articles"]] == [500]
+    assert out["scanned"] >= 31
+
+
+@pytest.mark.asyncio
+async def test_news_pulse_returns_all_requested_symbols(app):
+    """`top` bounds discovery mode only; explicitly requested symbols must
+    all come back regardless of activity ranking."""
+    mcp = build_mcp()
+    for i, sym in enumerate(["AA1", "BB2", "CC3"]):
+        await _ingest(app.store, 700 + i, f"story about {sym}", symbols=[sym])
+    out = await _call(
+        mcp, "get_news_pulse", symbols=["AA1", "BB2", "CC3"], top=1
+    )
+    assert set(out["symbols"]) == {"AA1", "BB2", "CC3"}
+    blank = await _call(mcp, "get_news_pulse", symbols=["  "])
+    assert blank["error"] == "no_symbols"

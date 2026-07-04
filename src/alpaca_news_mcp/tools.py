@@ -460,11 +460,15 @@ def register(mcp: FastMCP) -> None:
         # slice (filtered[:-N]) would silently drop items rather than bound them.
         max_articles = max(1, min(max_articles, MAX_DIGEST_ARTICLES))
         app = get_app_state()
+        # Scan a wider bounded slice of the window than the response size:
+        # breaking_matches=false is a claim that NOTHING breaking happened,
+        # and a matching article ranked just below the newest max_articles
+        # routine ones must not falsify it.
         articles = await app.store.get_recent_articles(
             minutes=minutes,
             symbols=symbols,
             sources=None,
-            limit=max_articles,
+            limit=MAX_ARTICLES_HARD,
         )
         # Filter to breaking-style markers. No silent fallback to ordinary
         # recent news: a digest that substitutes routine articles when
@@ -476,8 +480,9 @@ def register(mcp: FastMCP) -> None:
             if any(term in text for term in breaking_terms):
                 filtered.append(a)
         return {
-            "count": len(filtered),
+            "count": len(filtered[:max_articles]),
             "breaking_matches": bool(filtered),
+            "scanned": len(articles),
             "articles": [
                 {
                     "id": a.id,
@@ -815,9 +820,17 @@ def register(mcp: FastMCP) -> None:
         if top > MAX_SYMBOLS_PER_LOOKUP:
             return _limit_exceeded(MAX_SYMBOLS_PER_LOOKUP, top)
         minutes = min(max(1, minutes), MAX_SYMBOL_MAP_MINUTES)
+        cleaned: list[str] | None = None
+        if symbols is not None:
+            cleaned = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+            if not cleaned:
+                return _err("no_symbols", "pass ticker symbols, or omit for busiest")
+        # `top` bounds discovery mode only — explicitly requested symbols
+        # must all come back (the list is already capped at 50 above).
+        limit = len(cleaned) if cleaned else max(1, top)
         app = get_app_state()
         pulse = await app.store.symbol_pulse(
-            minutes=minutes, symbols=symbols, limit=max(1, top)
+            minutes=minutes, symbols=cleaned, limit=limit
         )
         return {"window_minutes": minutes, "symbols": pulse, "count": len(pulse)}
 
@@ -833,23 +846,27 @@ def register(mcp: FastMCP) -> None:
     async def fetch_news_history(
         symbols: list[str], days: int = 30, max_articles: int = 200
     ) -> dict[str, Any]:
-        if not symbols:
+        # Clean BEFORE validating: a blanks-only list would otherwise reach
+        # the backfill worker as [], which omits the REST symbols param and
+        # ingests unfiltered market-wide news for the whole window.
+        cleaned = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+        if not cleaned:
             return _err("no_symbols", "pass 1-5 ticker symbols")
-        if len(symbols) > 5:
-            return _limit_exceeded(5, len(symbols))
+        if len(cleaned) > 5:
+            return _limit_exceeded(5, len(cleaned))
         if days < 1 or days > 365:
             return _err("invalid_days", "pass days between 1 and 365", min=1, max=365)
         if max_articles > 500:
             return _limit_exceeded(500, max_articles)
         app = get_app_state()
         result = await app.rest_backfill.history(
-            symbols=[s.strip().upper() for s in symbols if s.strip()],
+            symbols=cleaned,
             days=days,
             max_articles=max(1, max_articles),
         )
         failure = result.pop("failure", None)
         out = {
-            "symbols": sorted({s.strip().upper() for s in symbols if s.strip()}),
+            "symbols": cleaned,
             "window_days": days,
             **result,
             "status": "incomplete" if failure else "ok",
