@@ -16,6 +16,10 @@ Important Alpaca rules:
   and at most ONE stock WebSocket per process (BaseStreamWorker enforces a
   per-subclass singleton).
 - The default news subscription is {"action":"subscribe","news":["*"]}.
+- The stock stream additionally subscribes statuses:["*"] as a SEPARATE
+  frame when STOCK_STATUS_WILDCARD is on (market-wide halt coverage;
+  statuses are a few tiny events per day). Watchlist deltas must not touch
+  the statuses channel while the wildcard is live.
 - Trust Alpaca subscription acknowledgements, not requested subscriptions.
 - On 406 connection limit exceeded, do not busy-loop. Surface the error and back off.
 - On 402 auth failure, retry on the slow AUTH_RETRY_SECONDS cadence with alerts.
