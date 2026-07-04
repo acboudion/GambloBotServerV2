@@ -599,11 +599,21 @@ class StockStreamWorker(BaseStreamWorker):
         if rows["quote_buckets"]:
             self._last_quote_bucket.update(rows["quote_buckets"])
         self._update_snapshots(batch)
-        await self._emit_market_alerts(rows["status_items"], rows["luld_items"])
-        # Derived price/volume alerts run on bar events only (~1 event per
-        # symbol per minute) — never on the quote hot path.
-        if rows["bar_items"]:
-            await self._emit_derived_alerts(rows["bar_items"])
+        try:
+            await self._emit_market_alerts(rows["status_items"], rows["luld_items"])
+            # Derived price/volume alerts run on bar events only (~1 event
+            # per symbol per minute) — never on the quote hot path.
+            if rows["bar_items"]:
+                await self._emit_derived_alerts(rows["bar_items"])
+        except Exception:
+            # The market transaction above already committed. A failed alert
+            # write (news DB lock/I/O) must not bubble into the persister's
+            # retry — trades/quotes have no uniqueness, so a replay would
+            # duplicate ticks and inflate volume/tape stats. The underlying
+            # events stay durable in stock_statuses/stock_lulds/stock_bars.
+            log.exception(
+                "post-commit alert emission failed (market rows committed)"
+            )
 
     def _rows_from_batch(
         self, batch: list[tuple[str, dict[str, Any]]]

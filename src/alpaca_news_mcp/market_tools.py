@@ -189,6 +189,51 @@ async def _rest_bars_fallback(
     return rows[-limit:]
 
 
+def _aggregate_minute_rows(
+    rows: list[dict[str, Any]], bucket_seconds: int
+) -> list[dict[str, Any]]:
+    """Python mirror of MarketStore.bars_window_aggregated for REST-fetched
+    minute rows (which never touch the local store)."""
+    buckets: dict[int, dict[str, Any]] = {}
+    for r in rows:  # ascending ts
+        b = r["ts"] - (r["ts"] % bucket_seconds)
+        agg = buckets.get(b)
+        volume = r.get("volume") or 0
+        vwap = r.get("vwap")
+        if agg is None:
+            buckets[b] = {
+                "ts": b,
+                "open": r.get("open"),
+                "high": r.get("high"),
+                "low": r.get("low"),
+                "close": r.get("close"),
+                "volume": volume,
+                "trade_count": r.get("trade_count") or 0,
+                "_vw_num": (float(vwap) * volume) if vwap is not None else 0.0,
+                "_vw_den": volume if vwap is not None else 0,
+            }
+            continue
+        if r.get("high") is not None:
+            agg["high"] = r["high"] if agg["high"] is None else max(agg["high"], r["high"])
+        if r.get("low") is not None:
+            agg["low"] = r["low"] if agg["low"] is None else min(agg["low"], r["low"])
+        if r.get("close") is not None:
+            agg["close"] = r["close"]
+        agg["volume"] += volume
+        agg["trade_count"] += r.get("trade_count") or 0
+        if vwap is not None:
+            agg["_vw_num"] += float(vwap) * volume
+            agg["_vw_den"] += volume
+    out = []
+    for b in sorted(buckets):
+        agg = buckets[b]
+        den = agg.pop("_vw_den")
+        num = agg.pop("_vw_num")
+        agg["vwap"] = round(num / den, 4) if den else None
+        out.append(agg)
+    return out
+
+
 def register(mcp: FastMCP) -> None:
     # ---- stream health / watchlist ------------------------------------------------
 
@@ -454,14 +499,31 @@ def register(mcp: FastMCP) -> None:
             return _invalid_date("end", end)
         symbol = symbol.strip().upper()
         if timeframe in AGGREGATE_TIMEFRAMES:
+            bucket = AGGREGATE_TIMEFRAMES[timeframe]
             rows = await market_store.bars_window_aggregated(
                 symbol,
-                bucket_seconds=AGGREGATE_TIMEFRAMES[timeframe],
+                bucket_seconds=bucket,
                 start_ts=start_ts,
                 end_ts=end_ts,
                 limit=max(1, limit),
             )
             source = "local"
+            if not rows and app.market_client is not None:
+                # Same REST fallback contract as 1min/1day: fetch the
+                # underlying minute rows and aggregate them here.
+                minute_limit = min(10_000, max(1, limit) * (bucket // 60))
+                fetch_start = (
+                    start_ts
+                    if start_ts is not None
+                    else int(datetime.now(UTC).timestamp()) - max(1, limit) * bucket
+                )
+                rest = await _rest_bars_fallback(
+                    app, symbol, "1min", fetch_start, end_ts, minute_limit
+                )
+                if isinstance(rest, dict):
+                    return rest
+                rows = _aggregate_minute_rows(rest, bucket)[-max(1, limit):]
+                source = "rest"
         else:
             rows = await market_store.bars_window(
                 symbol,
@@ -813,6 +875,19 @@ def register(mcp: FastMCP) -> None:
         pulse = await market_store.watchlist_pulse(
             wanted, since_us=_minutes_ago_us(max(1, minutes))
         )
+        # The snapshot cache misses halts that predate this process (restart
+        # mid-halt) or symbols added after their halt event; the retained
+        # stock_statuses rows keep the latest state, so union both sources.
+        latest_status: dict[str, str] = {}
+        if pulse:
+            statuses = await market_store.recent_statuses(
+                minutes=app.config.status_retention_days * 1440,
+                symbols=list(pulse),
+                limit=500,
+            )
+            for st in statuses:  # newest first
+                latest_status.setdefault(st["symbol"], st.get("status_code") or "")
+        db_halted = {s for s, code in latest_status.items() if code == "H"}
         rows = []
         for sym in sorted(pulse):
             entry = pulse[sym]
@@ -824,7 +899,8 @@ def register(mcp: FastMCP) -> None:
             status = (market_store.snapshots.get(sym) or {}).get("status") or {}
             rows.append([
                 sym, last, chg, entry.get("volume"), entry.get("trades"),
-                entry.get("spread_bps"), status.get("sc") == "H",
+                entry.get("spread_bps"),
+                sym in db_halted or status.get("sc") == "H",
             ])
         return {
             "window_minutes": minutes,

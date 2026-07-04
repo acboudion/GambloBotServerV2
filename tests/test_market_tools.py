@@ -479,6 +479,35 @@ async def test_get_stock_bars_aggregated_timeframes(app):
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_get_stock_bars_aggregate_rest_fallback(app_with_client):
+    """Aggregate timeframes on an empty local store must fall back to REST
+    like 1min/1day do: fetch the underlying minute bars, aggregate them
+    server-side, and report source='rest' — not return an empty result."""
+    minute_bars = [
+        {"t": f"2026-07-02T13:{30 + i}:00Z", "o": 1.0 + i, "h": 2.0 + i,
+         "l": 0.5, "c": 1.5 + i, "v": 100, "n": 5, "vw": 1.2 + i}
+        for i in range(10)
+    ]
+    respx.get("https://data.alpaca.markets/v2/stocks/bars").mock(
+        return_value=httpx.Response(
+            200, json={"bars": {"AAPL": minute_bars}, "next_page_token": None}
+        )
+    )
+    mcp = build_mcp()
+    out = await _call(mcp, "get_stock_bars", symbol="AAPL", timeframe="5min",
+                      start="2026-07-02T13:00:00Z")
+    assert out["source"] == "rest"
+    assert out["count"] == 2  # 10 minute bars -> two 5min buckets
+    rows = [dict(zip(out["columns"], r, strict=True)) for r in out["bars"]]
+    assert rows[0]["open"] == 1.0 and rows[0]["close"] == 5.5
+    assert rows[0]["high"] == 6.0 and rows[0]["low"] == 0.5
+    assert rows[0]["volume"] == 500 and rows[0]["trade_count"] == 25
+    assert rows[0]["vwap"] == pytest.approx(3.2)  # volume-weighted
+    assert rows[1]["open"] == 6.0
+
+
+@pytest.mark.asyncio
 async def test_get_watchlist_pulse_rows(app):
     now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
     await app.market_store.persist_stream_batch(trades=[
@@ -515,6 +544,25 @@ async def test_watchlist_pulse_includes_inactive_symbols(app):
     assert rows["TSLA"]["trades"] == 0
     assert rows["TSLA"]["last"] is None
     assert rows["TSLA"]["halted"] is True
+
+
+@pytest.mark.asyncio
+async def test_watchlist_pulse_halted_from_retained_status_rows(app):
+    """A halt that predates this process (restart mid-halt, or a symbol added
+    after its halt event) exists only in stock_statuses — the snapshot cache
+    has no status. The retained row must still set halted=true, and a newer
+    retained resume must clear it."""
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    await app.market_store.persist_stream_batch(statuses=[
+        ("TSLA", now_us - 3_000_000, "H", "Trading Halt", "T1", "News Pending", "C"),
+        ("AAPL", now_us - 3_000_000, "H", "Trading Halt", "T1", "News Pending", "C"),
+        ("AAPL", now_us - 1_000_000, "T", "Trading Resumption", "", "", "C"),
+    ])
+    mcp = build_mcp()
+    out = await _call(mcp, "get_watchlist_pulse", minutes=5)
+    rows = {r[0]: dict(zip(out["columns"], r, strict=True)) for r in out["rows"]}
+    assert rows["TSLA"]["halted"] is True  # DB-only halt, empty snapshot cache
+    assert rows["AAPL"]["halted"] is False  # newest retained row is a resume
 
 
 @pytest.mark.asyncio

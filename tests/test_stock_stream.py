@@ -169,6 +169,29 @@ async def test_persist_batch_writes_all_types_and_snapshots(wired):
 
 
 @pytest.mark.asyncio
+async def test_persist_batch_swallows_post_commit_alert_failure(wired, monkeypatch):
+    """Alert emission runs after the market transaction commits. If it fails
+    (news DB lock/IO), persist_batch must not raise — the persister's retry
+    would replay the whole batch, and trades/quotes have no uniqueness, so a
+    replay duplicates ticks and inflates volume/tape stats."""
+    cfg, store, market_store, state, alerts = wired
+    worker = _worker(cfg, store, market_store, state, alerts)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("news db locked")
+
+    monkeypatch.setattr(worker, "_emit_market_alerts", boom)
+    batch = [("t", _trade()), ("b", _bar()), ("s", _status())]
+    await worker.persist_batch(batch)  # must not raise
+
+    since_us = _to_epoch_us("2026-04-28T00:00:00Z")
+    trades = await market_store.trades_window("AAPL", since_us=since_us, limit=10)
+    assert len(trades) == 1  # committed exactly once, no retry replay
+    assert len(await market_store.recent_statuses(minutes=10**6)) == 1
+    assert market_store.snapshots.get("AAPL")["trade"]["p"] == 190.5
+
+
+@pytest.mark.asyncio
 async def test_halt_alert_for_watchlist_symbol_is_critical(wired):
     cfg, store, market_store, state, alerts = wired
     worker = _worker(cfg, store, market_store, state, alerts)
