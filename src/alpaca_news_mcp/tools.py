@@ -22,6 +22,9 @@ from .tool_common import (
     severities_at_or_above,
 )
 from .tool_common import (
+    apply_gap_info as _apply_gap_info,
+)
+from .tool_common import (
     cursor_out_of_range as _cursor_out_of_range,
 )
 from .tool_common import (
@@ -259,10 +262,10 @@ def register(mcp: FastMCP) -> None:
             "has_more": has_more,
         }
         if cursor:
-            min_seq = await app.store.min_article_seq()
-            if min_seq and cursor < min_seq - 1:
-                out["gap"] = True
-                out["oldest_available_cursor"] = min_seq - 1
+            _apply_gap_info(
+                out, cursor=cursor, latest=latest,
+                min_seq=await app.store.min_article_seq(),
+            )
         return out
 
     @mcp.tool(
@@ -323,10 +326,10 @@ def register(mcp: FastMCP) -> None:
             "has_more": has_more,
         }
         if cursor:
-            min_seq = await app.store.min_alert_seq()
-            if min_seq and cursor < min_seq - 1:
-                out["gap"] = True
-                out["oldest_available_cursor"] = min_seq - 1
+            _apply_gap_info(
+                out, cursor=cursor, latest=latest,
+                min_seq=await app.store.min_alert_seq(),
+            )
         return out
 
     @mcp.tool(description="Get a single news article by Alpaca id, optionally with version history.")

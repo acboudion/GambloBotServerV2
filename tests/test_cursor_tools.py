@@ -271,3 +271,34 @@ async def test_pruned_history_flags_gap(app):
     assert out["gap"] is True
     assert out["oldest_available_cursor"] == 2
     assert "latest_cursor" in out
+
+
+@pytest.mark.asyncio
+async def test_full_prune_still_flags_gap(app):
+    """Retention pruning EVERY article must not read as a clean empty page:
+    the persisted high-water mark keeps latest_cursor above a saved cursor,
+    and that whole span is a gap."""
+    mcp = build_mcp()
+    payload_extra = {
+        "created_at": "2020-01-01T00:00:00Z",
+        "updated_at": "2020-01-01T00:00:01Z",
+    }
+    await _ingest(app.store, 1, "old 1", **payload_extra)
+    await _ingest(app.store, 2, "old 2", **payload_extra)
+    async with app.store._write_lock:
+        await app.store.conn.execute(
+            "UPDATE news_articles SET first_seen_at = '2020-01-02T00:00:00+00:00'"
+        )
+        await app.store.conn.commit()
+    await app.store.prune_retention(event_days=1, raw_event_days=1)
+
+    # No new article after the prune: the table is empty, min_seq is 0.
+    out = await _call(mcp, "get_news_since", cursor=1)
+    assert out["articles"] == []
+    assert out["gap"] is True
+    assert out["oldest_available_cursor"] == out["latest_cursor"] == 2
+
+    # Resuming from latest_cursor is clean — no phantom gap.
+    out2 = await _call(mcp, "get_news_since", cursor=out["latest_cursor"])
+    assert out2["count"] == 0
+    assert "gap" not in out2

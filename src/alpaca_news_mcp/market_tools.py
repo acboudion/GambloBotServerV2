@@ -15,6 +15,9 @@ from mcp.server.fastmcp import FastMCP
 
 from .app_state import AppState, get_app_state
 from .tool_common import (
+    apply_gap_info as _apply_gap_info,
+)
+from .tool_common import (
     client_unavailable as _client_unavailable,
 )
 from .tool_common import (
@@ -645,10 +648,10 @@ def register(mcp: FastMCP) -> None:
             "has_more": has_more,
         }
         if cursor:
-            min_seq = await market_store.min_bar_seq()
-            if min_seq and cursor < min_seq - 1:
-                out["gap"] = True
-                out["oldest_available_cursor"] = min_seq - 1
+            _apply_gap_info(
+                out, cursor=cursor, latest=latest,
+                min_seq=await market_store.min_bar_seq(),
+            )
         return out
 
     # ---- halts ------------------------------------------------------------------------------

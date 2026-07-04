@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from .app_state import AppState, get_app_state
 from .tool_common import (
     SEVERITIES,
+    apply_gap_info,
     cursor_out_of_range,
     err,
     filter_over_cap,
@@ -83,10 +84,10 @@ async def _news_section(
         "has_more": has_more,
     }
     if cursor:
-        min_seq = await app.store.min_article_seq()
-        if min_seq and cursor < min_seq - 1:
-            out["gap"] = True
-            out["oldest_available_cursor"] = min_seq - 1
+        apply_gap_info(
+            out, cursor=cursor, latest=latest,
+            min_seq=await app.store.min_article_seq(),
+        )
     return out
 
 
@@ -113,10 +114,10 @@ async def _alerts_section(
         "has_more": has_more,
     }
     if cursor:
-        min_seq = await app.store.min_alert_seq()
-        if min_seq and cursor < min_seq - 1:
-            out["gap"] = True
-            out["oldest_available_cursor"] = min_seq - 1
+        apply_gap_info(
+            out, cursor=cursor, latest=latest,
+            min_seq=await app.store.min_alert_seq(),
+        )
     return out
 
 
@@ -143,10 +144,10 @@ async def _bars_section(
         "has_more": has_more,
     }
     if cursor:
-        min_seq = await app.market_store.min_bar_seq()
-        if min_seq and cursor < min_seq - 1:
-            out["gap"] = True
-            out["oldest_available_cursor"] = min_seq - 1
+        apply_gap_info(
+            out, cursor=cursor, latest=latest,
+            min_seq=await app.market_store.min_bar_seq(),
+        )
     return out
 
 

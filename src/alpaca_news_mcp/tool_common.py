@@ -108,6 +108,25 @@ def tail_response(items_key: str, latest: int) -> dict[str, Any]:
     }
 
 
+def apply_gap_info(
+    out: dict[str, Any], *, cursor: int, latest: int, min_seq: int
+) -> None:
+    """Annotate a nonzero-cursor delta response with gap metadata.
+
+    min_seq == 0 means retention pruned every row while the persisted
+    high-water mark keeps `latest` above a saved cursor — that is the
+    largest possible gap, not a clean empty page. oldest_available_cursor
+    is the position to resume from without missing anything still stored.
+    """
+    if min_seq:
+        if cursor < min_seq - 1:
+            out["gap"] = True
+            out["oldest_available_cursor"] = min_seq - 1
+    elif cursor < latest:
+        out["gap"] = True
+        out["oldest_available_cursor"] = latest
+
+
 def stream_disabled() -> dict[str, Any]:
     return err(
         "stock_stream_disabled",
@@ -143,6 +162,7 @@ __all__ = [
     "SEVERITIES",
     "SEVERITY_ORDER",
     "VALID_FIELD_MODES",
+    "apply_gap_info",
     "client_unavailable",
     "cursor_out_of_range",
     "err",

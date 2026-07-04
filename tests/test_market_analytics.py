@@ -88,6 +88,32 @@ async def test_bars_window_aggregated_golden(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_bars_window_aggregated_ignores_null_vwap_volume(tmp_path):
+    """A minute bar with NULL vwap contributes nothing to the numerator, so
+    its volume must not inflate the denominator and bias the bucket vwap
+    toward zero."""
+    from alpaca_news_mcp.market_store import MarketStore
+
+    store = await MarketStore.open(str(tmp_path / "m.sqlite"))
+    await store.init_schema()
+    try:
+        base = 1_760_000_100
+        base -= base % 300
+        await store.persist_stream_batch(bars=[
+            ("AAPL", "1min", base, 10.0, 10.0, 10.0, 10.0, 100, 5, 10.0),
+            ("AAPL", "1min", base + 60, 10.0, 10.0, 10.0, 10.0, 300, 5, None),
+        ])
+        agg = await store.bars_window_aggregated("AAPL", bucket_seconds=300, limit=10)
+        assert len(agg) == 1
+        # Weighted only over the row that has a vwap: 10.0, not
+        # 10*100/(100+300) = 2.5.
+        assert agg[0]["vwap"] == pytest.approx(10.0)
+        assert agg[0]["volume"] == 400  # total volume still counts both rows
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_tape_and_quote_stats(tmp_path):
     from alpaca_news_mcp.market_store import MarketStore
 

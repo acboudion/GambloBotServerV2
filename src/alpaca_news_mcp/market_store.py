@@ -356,8 +356,13 @@ class MarketStore:
                      LAST_VALUE(close) OVER w AS close,
                      SUM(volume) OVER w AS volume,
                      SUM(trade_count) OVER w AS trade_count,
+                     -- Weight only rows with a vwap: SUM skips NULL products
+                     -- in the numerator, so counting those rows' volume in
+                     -- the denominator would bias the result toward zero.
                      CAST(SUM(vwap * volume) OVER w AS REAL)
-                         / NULLIF(SUM(volume) OVER w, 0) AS vwap,
+                         / NULLIF(SUM(
+                             CASE WHEN vwap IS NOT NULL THEN volume ELSE 0 END
+                           ) OVER w, 0) AS vwap,
                      ROW_NUMBER() OVER (
                          PARTITION BY bucket_ts ORDER BY bar_ts DESC
                      ) AS rn
