@@ -28,7 +28,11 @@ log = get_logger(__name__)
 # during market hours can't starve the ingest batch writer.
 RETENTION_DELETE_CHUNK = 50_000
 
-TICK_TABLES = ("stock_trades", "stock_quotes", "stock_statuses", "stock_lulds")
+TICK_TABLES = ("stock_trades", "stock_quotes")
+# Halt/LULD rows are a few per day, tiny, and decision-critical (an active
+# halt must stay visible to get_trading_halts) — they get a day-scale
+# retention instead of the 4-hour tick window.
+EVENT_TABLES = ("stock_statuses", "stock_lulds")
 
 # market_status row persisting the bar-seq allocation high-water mark; see
 # store.SEQ_WATERMARKS_KEY for why MAX(seq) alone is not restart-safe.
@@ -430,7 +434,7 @@ class MarketStore:
             (datetime.now(UTC) - timedelta(minutes=minutes)).timestamp() * 1_000_000
         )
         out: dict[str, int] = {}
-        for table in TICK_TABLES:
+        for table in TICK_TABLES + EVENT_TABLES:
             cur = await self.rconn.execute(
                 f"SELECT COUNT(*) AS c FROM {table} WHERE ts_us >= ?", (since_us,)
             )
@@ -449,11 +453,18 @@ class MarketStore:
     # ---- retention -----------------------------------------------------------------
 
     async def prune(
-        self, *, tick_retention_minutes: int, bar_retention_days: int
+        self,
+        *,
+        tick_retention_minutes: int,
+        bar_retention_days: int,
+        status_retention_days: int = 30,
     ) -> dict[str, int]:
         now = datetime.now(UTC)
         tick_cutoff_us = int(
             (now - timedelta(minutes=tick_retention_minutes)).timestamp() * 1_000_000
+        )
+        event_cutoff_us = int(
+            (now - timedelta(days=status_retention_days)).timestamp() * 1_000_000
         )
         bar_cutoff_s = int((now - timedelta(days=bar_retention_days)).timestamp())
         raw_cutoff_iso = (now - timedelta(minutes=tick_retention_minutes)).isoformat()
@@ -461,6 +472,10 @@ class MarketStore:
         for table in TICK_TABLES:
             deleted[table.removeprefix("stock_")] = await self._chunked_delete(
                 table, "ts_us", tick_cutoff_us
+            )
+        for table in EVENT_TABLES:
+            deleted[table.removeprefix("stock_")] = await self._chunked_delete(
+                table, "ts_us", event_cutoff_us
             )
         # stock_bars is WITHOUT ROWID (no rowid for chunking) but tiny relative
         # to ticks (~390 rows/symbol/day), so a direct delete is fine.

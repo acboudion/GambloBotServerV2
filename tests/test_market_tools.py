@@ -395,3 +395,35 @@ async def test_get_trading_halts_caps_symbol_count(app):
     )
     assert out["error"] == "limit_exceeded"
     assert out["max_allowed"] == 50
+
+
+@pytest.mark.asyncio
+async def test_latest_market_data_staleness_signal(app):
+    """Pre-disconnect cache entries must be flagged: age_seconds always,
+    stale when the stream is down or the data is old."""
+    mcp = build_mcp()
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    old_us = int((datetime.now(UTC) - timedelta(minutes=10)).timestamp() * 1_000_000)
+    app.market_store.snapshots.update("AAPL", "trade", {"p": 190.5, "ts_us": now_us})
+    app.market_store.snapshots.update("TSLA", "trade", {"p": 250.0, "ts_us": old_us})
+
+    # Stream disconnected (default health): everything from the cache is stale.
+    out = await _call(mcp, "get_latest_market_data", symbols=["AAPL", "TSLA"])
+    assert out["stream_connected"] is False
+    assert set(out["stale"]) == {"AAPL", "TSLA"}
+
+    # Stream connected: only the old entry is stale.
+    app.state.update_health("stocks", connected=True)
+    out = await _call(mcp, "get_latest_market_data", symbols=["AAPL", "TSLA"])
+    assert out["stream_connected"] is True
+    assert out.get("stale") == ["TSLA"]
+    assert out["age_seconds"]["AAPL"] < 60
+    assert out["age_seconds"]["TSLA"] > 300
+
+
+@pytest.mark.asyncio
+async def test_trading_halts_window_clamps_to_retention(app):
+    mcp = build_mcp()
+    out = await _call(mcp, "get_trading_halts", minutes=10_000_000)
+    assert out["clamped_to_minutes"] == app.config.status_retention_days * 1440
+    assert out["window_minutes"] == out["clamped_to_minutes"]

@@ -135,6 +135,7 @@ class Config:
     market_storage_path: str
     stock_tick_retention_minutes: int
     stock_bar_retention_days: int
+    status_retention_days: int
     market_retention_interval_seconds: int
     gap_fill_max_lookback_minutes: int
 
@@ -225,6 +226,7 @@ class Config:
             market_storage_path=_get_str("MARKET_STORAGE_PATH", "/data/alpaca_market.sqlite"),
             stock_tick_retention_minutes=_get_int("STOCK_TICK_RETENTION_MINUTES", 240),
             stock_bar_retention_days=_get_int("STOCK_BAR_RETENTION_DAYS", 30),
+            status_retention_days=_get_int("STATUS_RETENTION_DAYS", 30),
             market_retention_interval_seconds=_get_int(
                 "MARKET_RETENTION_INTERVAL_SECONDS", 900
             ),

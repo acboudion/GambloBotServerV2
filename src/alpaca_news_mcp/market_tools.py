@@ -16,6 +16,9 @@ from mcp.server.fastmcp import FastMCP
 from .app_state import AppState, get_app_state
 
 MAX_LATEST_SYMBOLS = 50
+# A stream-cached snapshot older than this is flagged stale — a bot must
+# never mistake pre-disconnect prices for live ones.
+SNAPSHOT_STALE_SECONDS = 120.0
 MAX_WINDOW_MINUTES = 240
 MAX_WINDOW_ROWS = 1000
 MAX_BARS = 1000
@@ -111,6 +114,36 @@ def _minutes_ago_us(minutes: int) -> int:
     return int((datetime.now(UTC) - timedelta(minutes=minutes)).timestamp() * 1_000_000)
 
 
+def _freshest_age_seconds(entry: dict[str, Any], now_us: int) -> float | None:
+    """Age of the newest data point across an entry's slots. Stream-cache
+    slots carry ts_us (epoch µs); REST-filled slots carry Alpaca's 't'
+    RFC3339 field."""
+    freshest: int | None = None
+    for value in entry.values():
+        if not isinstance(value, dict):
+            continue
+        ts_us = value.get("ts_us")
+        if not isinstance(ts_us, int):
+            ts_us = _iso_ts_to_us(value.get("t"))
+        if ts_us is not None and (freshest is None or ts_us > freshest):
+            freshest = ts_us
+    if freshest is None:
+        return None
+    return round(max(0.0, (now_us - freshest) / 1_000_000), 1)
+
+
+def _iso_ts_to_us(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        dt = dateparser.isoparse(value)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1_000_000)
+
+
 def register(mcp: FastMCP) -> None:
     # ---- stream health / watchlist ------------------------------------------------
 
@@ -167,7 +200,10 @@ def register(mcp: FastMCP) -> None:
             "Latest market data per symbol from the live stream cache. "
             "include: any of trade, quote, bar, daily_bar, status, luld. "
             "Symbols not on the watchlist appear under 'missing' — add them "
-            "with set_stock_watchlist or use get_stock_snapshots (REST)."
+            "with set_stock_watchlist or use get_stock_snapshots (REST). "
+            "age_seconds gives per-symbol data age; symbols in 'stale' "
+            "should not be trusted for live pricing (stream disconnected or "
+            "data older than 120s)."
         )
     )
     async def get_latest_market_data(
@@ -206,8 +242,8 @@ def register(mcp: FastMCP) -> None:
         # only — statuses/LULD have no latest REST endpoint).
         rest_kinds = {"trade": "trades", "quote": "quotes", "bar": "bars"}
         wanted_rest = [k for k in include if k in rest_kinds]
+        filled: set[str] = set()
         if missing and app.market_client is not None and wanted_rest:
-            filled: set[str] = set()
             for key in wanted_rest:
                 payload = await app.market_client.latest(rest_kinds[key], missing)
                 if not payload:
@@ -229,13 +265,37 @@ def register(mcp: FastMCP) -> None:
             for sym, entry in sorted(out.items())
             if (absent := sorted(k for k in reportable if k not in entry))
         }
-        return {
+        # Staleness: a fresh as_of must never dress up pre-disconnect cache
+        # entries as live prices. REST-filled symbols are live by definition;
+        # stream-cached ones are stale when the stream is down or the data
+        # is old.
+        now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+        stream_connected = bool(app.state.snapshot_health("stocks").connected)
+        age_seconds: dict[str, float] = {}
+        stale: list[str] = []
+        for sym, entry in out.items():
+            age = _freshest_age_seconds(entry, now_us)
+            if age is not None:
+                age_seconds[sym] = age
+            from_stream = sym not in filled
+            if from_stream and (
+                not stream_connected
+                or age is None
+                or age > SNAPSHOT_STALE_SECONDS
+            ):
+                stale.append(sym)
+        result = {
             "symbols": out,
             "missing": missing,
             "missing_fields": missing_fields,
             "source": source,
+            "stream_connected": stream_connected,
+            "age_seconds": age_seconds,
             "as_of": datetime.now(UTC).isoformat(),
         }
+        if stale:
+            result["stale"] = sorted(stale)
+        return result
 
     # ---- windows ------------------------------------------------------------------------
 
@@ -427,7 +487,8 @@ def register(mcp: FastMCP) -> None:
     @mcp.tool(
         description=(
             "Trading-status changes (halts/resumes) and LULD band updates over "
-            "the past `minutes`, newest first."
+            "the past `minutes` (retained for STATUS_RETENTION_DAYS, default "
+            "30d), newest first. Timestamps (ts_us) are epoch microseconds UTC."
         )
     )
     async def get_trading_halts(
@@ -446,17 +507,25 @@ def register(mcp: FastMCP) -> None:
         # oversized lists structurally like the other symbol-filtered tools.
         if symbols and len(symbols) > MAX_LATEST_SYMBOLS:
             return _limit_exceeded(MAX_LATEST_SYMBOLS, len(symbols))
+        # Clamp to what retention actually keeps and say so — a window the
+        # store cannot serve must not silently look empty-but-complete.
+        retention_minutes = app.config.status_retention_days * 1440
+        clamped = minutes > retention_minutes
+        minutes = min(max(1, minutes), retention_minutes)
         statuses = await market_store.recent_statuses(
-            minutes=max(1, minutes), symbols=symbols, limit=max(1, limit)
+            minutes=minutes, symbols=symbols, limit=max(1, limit)
         )
         lulds = await market_store.recent_lulds(
-            minutes=max(1, minutes), symbols=symbols, limit=max(1, limit)
+            minutes=minutes, symbols=symbols, limit=max(1, limit)
         )
-        return {
+        out: dict[str, Any] = {
             "window_minutes": minutes,
             "statuses": statuses,
             "lulds": lulds,
         }
+        if clamped:
+            out["clamped_to_minutes"] = minutes
+        return out
 
     # ---- REST market context (works even with the stock stream disabled) ---------------
 

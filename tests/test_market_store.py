@@ -223,3 +223,30 @@ async def test_bar_seq_watermark_survives_prune_and_restart(tmp_path):
         assert [r["ts"] for r in rows] == [new_ts]
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_active_halt_survives_tick_retention(market_store):
+    """Statuses/LULDs are pruned on a day-scale retention, not the 4-hour
+    tick window — an active halt must stay visible to get_trading_halts."""
+    now = datetime.now(UTC)
+    five_h_ago = _us(now - timedelta(hours=5))
+    await market_store.persist_stream_batch(
+        trades=[("AAPL", five_h_ago, 190.0, 100, "V", "@", "C", 1)],
+        statuses=[("AAPL", five_h_ago, "H", "Trading Halt", "T1", "News", "C")],
+        lulds=[("AAPL", five_h_ago, 200.0, 180.0, "B", "C")],
+    )
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=30
+    )
+    assert deleted["trades"] == 1  # the tick is gone
+    statuses = await market_store.recent_statuses(minutes=24 * 60, limit=10)
+    assert len(statuses) == 1  # the halt survives
+    lulds = await market_store.recent_lulds(minutes=24 * 60, limit=10)
+    assert len(lulds) == 1
+
+    # Events older than the status retention do get pruned.
+    deleted = await market_store.prune(
+        tick_retention_minutes=240, bar_retention_days=30, status_retention_days=0
+    )
+    assert deleted["statuses"] == 1 and deleted["lulds"] == 1

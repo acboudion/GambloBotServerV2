@@ -169,6 +169,7 @@ async def _market_retention_loop(app_state: AppState) -> None:
             deleted = await app_state.market_store.prune(
                 tick_retention_minutes=app_state.config.stock_tick_retention_minutes,
                 bar_retention_days=app_state.config.stock_bar_retention_days,
+                status_retention_days=app_state.config.status_retention_days,
             )
             if any(deleted.values()):
                 log.info("market retention pruned: %s", deleted)
