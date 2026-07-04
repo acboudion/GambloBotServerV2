@@ -9,6 +9,7 @@ per symbol so `get_latest_*` tools never touch the database.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from importlib import resources
@@ -28,6 +29,10 @@ log = get_logger(__name__)
 RETENTION_DELETE_CHUNK = 50_000
 
 TICK_TABLES = ("stock_trades", "stock_quotes", "stock_statuses", "stock_lulds")
+
+# market_status row persisting the bar-seq allocation high-water mark; see
+# store.SEQ_WATERMARKS_KEY for why MAX(seq) alone is not restart-safe.
+BAR_SEQ_KEY = "bar_seq_high_water"
 
 
 def _utcnow_iso() -> str:
@@ -120,7 +125,19 @@ class MarketStore:
             cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM stock_bars")
             row = await cur.fetchone()
             await cur.close()
-            self._next_bar_seq = (int(row[0]) if row else 0) + 1
+            max_bar_seq = int(row[0]) if row else 0
+            cur = await self.conn.execute(
+                "SELECT value_json FROM market_status WHERE key = ?", (BAR_SEQ_KEY,)
+            )
+            row = await cur.fetchone()
+            await cur.close()
+            persisted = 0
+            if row is not None:
+                try:
+                    persisted = int(json.loads(row["value_json"]).get("seq", 0))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    persisted = 0
+            self._next_bar_seq = max(max_bar_seq, persisted) + 1
         # After the schema exists and WAL mode is committed — mode=ro on a
         # nonexistent file would fail.
         self._read_conn = await open_read_connection(self.path)
@@ -181,6 +198,20 @@ class MarketStore:
                         "  trade_count = excluded.trade_count, vwap = excluded.vwap, "
                         "  updated_at = excluded.updated_at, seq = excluded.seq",
                         rows,
+                    )
+                    # Same transaction as the seq-consuming write, so any
+                    # committed bar's seq is covered by the committed mark.
+                    await self.conn.execute(
+                        "INSERT INTO market_status (key, value_json, updated_at) "
+                        "VALUES (?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET "
+                        "  value_json = excluded.value_json, "
+                        "  updated_at = excluded.updated_at",
+                        (
+                            BAR_SEQ_KEY,
+                            json.dumps({"seq": self._next_bar_seq - 1}),
+                            now,
+                        ),
                     )
                 if statuses:
                     await self.conn.executemany(

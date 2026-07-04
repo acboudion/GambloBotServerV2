@@ -193,3 +193,33 @@ async def test_memory_store_falls_back_to_writer_connection():
         assert got == []
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_bar_seq_watermark_survives_prune_and_restart(tmp_path):
+    path = str(tmp_path / "wm-market.sqlite")
+    store = await MarketStore.open(path)
+    await store.init_schema()
+    old_ts = int((datetime.now(UTC) - timedelta(days=60)).timestamp()) // 60 * 60
+    await store.persist_stream_batch(
+        bars=[("AAPL", "1min", old_ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2)]
+    )
+    _, cursor, _ = await store.bars_since(cursor=0, limit=10)
+    assert cursor >= 1
+    # Retention removes every bar (60 days old vs 30-day retention).
+    await store.prune(tick_retention_minutes=240, bar_retention_days=30)
+    rows, _, _ = await store.bars_since(cursor=0, limit=10)
+    assert rows == []
+    await store.close()
+
+    store = await MarketStore.open(path)
+    await store.init_schema()
+    try:
+        new_ts = int(datetime.now(UTC).timestamp()) // 60 * 60
+        await store.persist_stream_batch(
+            bars=[("AAPL", "1min", new_ts, 1.0, 2.0, 0.5, 1.5, 1000, 10, 1.2)]
+        )
+        rows, _, _ = await store.bars_since(cursor=cursor, limit=10)
+        assert [r["ts"] for r in rows] == [new_ts]
+    finally:
+        await store.close()

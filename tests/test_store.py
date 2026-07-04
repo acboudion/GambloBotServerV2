@@ -448,3 +448,65 @@ async def test_reader_does_not_see_uncommitted_batch(open_store):
         await writer.upsert_article(replacement, source_kind="ws")
     articles, _, _ = await open_store.articles_since(cursor=0, limit=10)
     assert [a.id for a in articles] == [900, 902]
+
+
+def _mk_alert(alert_id: str):
+    from alpaca_news_mcp.models import Alert
+
+    return Alert(
+        alert_id=alert_id,
+        article_id=None,
+        created_at="2020-01-01T00:00:00+00:00",
+        severity="high",
+        category="mna_keyword",
+        symbols=["AAPL"],
+        headline="h",
+        reason="r",
+        acknowledged=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_seq_watermarks_survive_prune_and_restart(tmp_path):
+    """Retention can delete the rows carrying MAX(seq); after a restart the
+    allocators must not re-issue consumed seq values or the bot's saved
+    cursors would silently hide all new rows."""
+    from alpaca_news_mcp.store import Store
+
+    path = str(tmp_path / "wm.sqlite")
+    store = await Store.open(path)
+    await store.init_schema()
+    # Article + alert with old timestamps so retention prunes them.
+    payload = _payload(500)
+    payload["created_at"] = "2020-01-01T00:00:00Z"
+    payload["updated_at"] = "2020-01-01T00:00:01Z"
+    await store.upsert_article(normalize_news_message(payload), source_kind="ws")
+    await store.record_alert(_mk_alert("old-alert"), raw_json="{}")
+    articles, news_cursor, _ = await store.articles_since(cursor=0, limit=10)
+    alerts, alert_cursor, _ = await store.alerts_since(cursor=0, limit=10)
+    assert news_cursor >= 1 and alert_cursor >= 1
+
+    # Backdate first_seen/created so the prune removes everything.
+    async with store._write_lock:
+        await store.conn.execute(
+            "UPDATE news_articles SET first_seen_at = '2020-01-02T00:00:00+00:00'"
+        )
+        await store.conn.commit()
+    pruned = await store.prune_retention(event_days=1, raw_event_days=1)
+    assert pruned["articles"] == 1 and pruned["alerts"] >= 1
+    await store.close()
+
+    # Restart on the same file: new rows must allocate ABOVE the old cursors.
+    store = await Store.open(path)
+    await store.init_schema()
+    try:
+        await store.upsert_article(
+            normalize_news_message(_payload(501)), source_kind="ws"
+        )
+        await store.record_alert(_mk_alert("new-alert"), raw_json="{}")
+        articles, _, _ = await store.articles_since(cursor=news_cursor, limit=10)
+        assert [a.id for a in articles] == [501]
+        alerts, _, _ = await store.alerts_since(cursor=alert_cursor, limit=10)
+        assert [a["alert_id"] for a in alerts] == ["new-alert"]
+    finally:
+        await store.close()

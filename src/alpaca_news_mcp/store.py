@@ -59,6 +59,14 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# stream_status row persisting the seq allocation high-water marks. Seeding
+# the allocators from MAX(seq) alone is not enough: retention can prune the
+# rows carrying MAX(seq), and a restart would then re-issue already-consumed
+# seq values — new rows landing at or below a poller's saved cursor would
+# never be delivered.
+SEQ_WATERMARKS_KEY = "seq_watermarks"
+
+
 async def open_read_connection(path: str) -> aiosqlite.Connection | None:
     """Open a read-only companion connection (WAL snapshot isolation).
 
@@ -95,6 +103,9 @@ class Store:
         self._read_conn: aiosqlite.Connection | None = None
         self._write_lock = asyncio.Lock()
         self._next_seq: int = 1
+        self._next_alert_seq: int = 1
+        # Set by the allocators; cleared when the watermarks row is written.
+        self._seq_dirty: bool = False
 
     @classmethod
     async def open(cls, path: str) -> Store:
@@ -138,7 +149,16 @@ class Store:
             cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM news_articles")
             row = await cur.fetchone()
             await cur.close()
-            self._next_seq = (int(row[0]) if row else 0) + 1
+            max_article_seq = int(row[0]) if row else 0
+            cur = await self.conn.execute("SELECT COALESCE(MAX(seq), 0) FROM alerts")
+            row = await cur.fetchone()
+            await cur.close()
+            max_alert_seq = int(row[0]) if row else 0
+            persisted = await self._read_status(self.conn, SEQ_WATERMARKS_KEY) or {}
+            self._next_seq = max(max_article_seq, int(persisted.get("news_seq", 0))) + 1
+            self._next_alert_seq = (
+                max(max_alert_seq, int(persisted.get("alert_seq", 0))) + 1
+            )
         # After the schema exists and WAL mode is committed — mode=ro on a
         # nonexistent file would fail.
         self._read_conn = await open_read_connection(self.path)
@@ -147,7 +167,43 @@ class Store:
         """Next monotonic ingest sequence. Callers must hold the write lock."""
         seq = self._next_seq
         self._next_seq += 1
+        self._seq_dirty = True
         return seq
+
+    def _allocate_alert_seq(self) -> int:
+        """Next monotonic alert cursor. Callers must hold the write lock."""
+        seq = self._next_alert_seq
+        self._next_alert_seq += 1
+        self._seq_dirty = True
+        return seq
+
+    async def _flush_watermarks_locked(self) -> None:
+        """Persist the allocation high-water marks inside the open transaction.
+
+        Called at every commit point that may have allocated seqs, so any
+        committed row's seq is always covered by the committed watermark row.
+        A rollback discards both together, keeping them consistent — the
+        in-memory allocators stay advanced, which only leaves harmless gaps.
+        """
+        if not self._seq_dirty:
+            return
+        await self.conn.execute(
+            """INSERT INTO stream_status (key, value_json, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                             updated_at = excluded.updated_at""",
+            (
+                SEQ_WATERMARKS_KEY,
+                json.dumps(
+                    {
+                        "news_seq": self._next_seq - 1,
+                        "alert_seq": self._next_alert_seq - 1,
+                    }
+                ),
+                _utcnow_iso(),
+            ),
+        )
+        self._seq_dirty = False
 
     async def upsert_article(
         self,
@@ -158,6 +214,7 @@ class Store:
         """Insert or update an article with its own transaction."""
         async with self._write_lock:
             result = await self._upsert_article_locked(normalized, source_kind=source_kind)
+            await self._flush_watermarks_locked()
             await self.conn.commit()
         return result
 
@@ -177,6 +234,7 @@ class Store:
             # pending alert quota/state.
             try:
                 yield BatchWriter(self)
+                await self._flush_watermarks_locked()
                 await self.conn.commit()
             except BaseException:
                 await self.conn.rollback()
@@ -544,6 +602,7 @@ class Store:
             inserted = await self._record_alert_locked(
                 alert, raw_json=raw_json, content_hash=content_hash
             )
+            await self._flush_watermarks_locked()
             await self.conn.commit()
             return inserted
 
@@ -566,13 +625,17 @@ class Store:
             if duplicate is not None:
                 return False
         try:
+            # Allocated after the dedup checks; an IntegrityError below leaves
+            # a gap in the sequence, which cursors tolerate (monotonic, not
+            # dense).
+            seq = self._allocate_alert_seq()
             await self.conn.execute(
                 """
                 INSERT INTO alerts (
                     alert_id, article_id, created_at, severity, category,
                     symbols_json, headline, reason, acknowledged, raw_json,
-                    content_hash, direction
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    content_hash, direction, seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     alert.alert_id,
@@ -586,6 +649,7 @@ class Store:
                     raw_json,
                     content_hash,
                     alert.direction,
+                    seq,
                 ),
             )
             return True
@@ -613,7 +677,13 @@ class Store:
             await self.conn.commit()
 
     async def get_status(self, key: str) -> dict[str, Any] | None:
-        cur = await self.rconn.execute(
+        return await self._read_status(self.rconn, key)
+
+    @staticmethod
+    async def _read_status(
+        conn: aiosqlite.Connection, key: str
+    ) -> dict[str, Any] | None:
+        cur = await conn.execute(
             "SELECT value_json FROM stream_status WHERE key = ?", (key,)
         )
         row = await cur.fetchone()
@@ -824,11 +894,16 @@ class Store:
         severity: str | None = None,
         categories: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], int, bool]:
-        """Alerts with rowid > cursor in insert order (alerts are insert-only).
+        """Alerts with seq > cursor in insert order (alerts are insert-only).
+
+        Pages on the explicit monotonic seq (migration m5) rather than the
+        implicit rowid: SQLite reuses rowids once retention prunes the
+        max-rowid row, which would make later alerts land at or below a
+        poller's saved cursor and never be delivered.
 
         Returns (alert_dicts_with_cursor, next_cursor, has_more).
         """
-        clauses = ["rowid > ?"]
+        clauses = ["seq > ?"]
         params: list[Any] = [cursor]
         if severity:
             clauses.append("severity = ?")
@@ -838,9 +913,9 @@ class Store:
             clauses.append(f"category IN ({placeholders})")
             params.extend(categories)
         sql = (
-            "SELECT rowid AS cursor_id, * FROM alerts WHERE "
+            "SELECT seq AS cursor_id, * FROM alerts WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY rowid ASC LIMIT ?"
+            + " ORDER BY seq ASC LIMIT ?"
         )
         params.append(limit + 1)
         cur = await self.rconn.execute(sql, params)

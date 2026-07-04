@@ -144,3 +144,37 @@ async def test_fresh_db_gets_user_version_and_seq_index(open_store):
     )
     row = await cur.fetchone()
     assert row is not None
+
+
+def _insert_old_alert(path: str, alert_id: str, created_at: str) -> None:
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO alerts (alert_id, article_id, created_at, severity, category, "
+        "symbols_json, headline, reason, acknowledged, raw_json) "
+        "VALUES (?, NULL, ?, 'high', 'mna_keyword', '[]', 'h', 'r', 0, '{}')",
+        (alert_id, created_at),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_m5_backfills_alert_seq_in_rowid_order(tmp_path):
+    path = str(tmp_path / "old.sqlite")
+    _make_old_db(path, [])
+    _insert_old_alert(path, "a-1", "2024-01-01T00:00:00+00:00")
+    _insert_old_alert(path, "a-2", "2024-01-02T00:00:00+00:00")
+    _insert_old_alert(path, "a-3", "2024-01-03T00:00:00+00:00")
+    async with aiosqlite.connect(path) as conn:
+        conn.row_factory = aiosqlite.Row
+        assert not await table_has_column(conn, "alerts", "seq")
+        await migrate(conn, NEWS_MIGRATIONS)
+        cur = await conn.execute("SELECT alert_id, seq FROM alerts ORDER BY seq")
+        rows = await cur.fetchall()
+        assert [(r["alert_id"], r["seq"]) for r in rows] == [
+            ("a-1", 1), ("a-2", 2), ("a-3", 3),
+        ]
+        cur = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_alerts_seq'"
+        )
+        assert await cur.fetchone() is not None

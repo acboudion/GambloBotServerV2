@@ -85,3 +85,12 @@ CREATE TABLE IF NOT EXISTS market_raw_events (
     raw_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_market_raw_received ON market_raw_events(received_at);
+
+-- Key/value status (seq allocation watermarks). This schema file runs on
+-- every startup with IF NOT EXISTS, so tables added here apply to existing
+-- databases without a migration framework.
+CREATE TABLE IF NOT EXISTS market_status (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
